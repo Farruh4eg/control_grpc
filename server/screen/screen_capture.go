@@ -1,0 +1,143 @@
+package screen
+
+import (
+	"errors"
+	"io"
+	"log"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/StackExchange/wmi"
+)
+
+type ScreenCapture struct {
+	cmd       *exec.Cmd
+	output    io.ReadCloser
+	restartCh chan struct{}
+	mu        sync.Mutex
+	running   bool
+}
+
+type Win32_VideoController struct {
+	Name string
+}
+
+func NewScreenCapture() (*ScreenCapture, error) {
+	sc := &ScreenCapture{
+		restartCh: make(chan struct{}, 1),
+		running:   true,
+	}
+
+	if err := sc.start(); err != nil {
+		return nil, err
+	}
+
+	go sc.monitor()
+	return sc, nil
+}
+
+func (sc *ScreenCapture) start() error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	accel, err := detectEncoder()
+	if err != nil {
+		return err
+	}
+
+	sc.cmd = exec.Command("../bin/ffmpeg.exe",
+		"-f", "gdigrab",
+		"-framerate", "30",
+		"-i", "desktop",
+		"-an",
+		"-vf", "scale=1920:1080",
+		"-c:v", accel,
+		"-b:v", "3M",
+		"-f", "h264",
+		"-flush_packets", "1",
+		"pipe:1",
+	)
+
+	sc.output, err = sc.cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := sc.cmd.Start(); err != nil {
+		return err
+	}
+
+	log.Printf("Screen capture started with %s encoder", accel)
+	return nil
+}
+
+func detectEncoder() (string, error) {
+	var controllers []Win32_VideoController
+	query := "SELECT Name FROM Win32_VideoController"
+	if err := wmi.Query(query, &controllers); err != nil || len(controllers) == 0 {
+		return "libx264", errors.New("fallback to software encoder")
+	}
+
+	gpuVendor := strings.ToLower(controllers[0].Name)
+	switch {
+	case strings.Contains(gpuVendor, "amd"):
+		return "h264_amf", nil
+	case strings.Contains(gpuVendor, "nvidia"):
+		return "h264_nvenc", nil
+	case strings.Contains(gpuVendor, "intel"):
+		return "h264_qsv", nil
+	default:
+		return "libx264", nil
+	}
+}
+
+func (sc *ScreenCapture) monitor() {
+	for sc.running {
+		select {
+		case <-sc.restartCh:
+			log.Println("Attempting to restart screen capture...")
+			sc.cleanup()
+			for retry := 0; retry < 3; retry++ {
+				if err := sc.start(); err == nil {
+					break
+				}
+				time.Sleep(time.Second * 2)
+			}
+		}
+	}
+}
+
+func (sc *ScreenCapture) ReadFrame(buffer []byte) (int, error) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if sc.output == nil {
+		return 0, io.EOF
+	}
+
+	n, err := sc.output.Read(buffer)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+		sc.restartCh <- struct{}{}
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+func (sc *ScreenCapture) Close() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	sc.running = false
+	sc.cleanup()
+}
+
+func (sc *ScreenCapture) cleanup() {
+	if sc.cmd != nil && sc.cmd.Process != nil {
+		sc.cmd.Process.Kill()
+	}
+	if sc.output != nil {
+		sc.output.Close()
+	}
+}

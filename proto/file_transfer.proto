@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package control_grpc;
+option go_package = "control_grpc/proto";
+
+service FileTransferService {
+  
+}
