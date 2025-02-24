@@ -19,7 +19,6 @@ import (
 	pb "control_grpc/gen/proto"
 )
 
-// MouseTracker encapsulates the current mouse button state.
 type MouseTracker struct {
 	mu       sync.Mutex
 	mouseBtn string
@@ -51,14 +50,11 @@ func main() {
 	}
 	defer cmd.Wait()
 
-	// Goroutine to forward video frames from the server to FFplay.
 	waitc := make(chan struct{})
 	go forwardVideoFeed(stream, pipe, waitc)
 
-	// Goroutine to track and send mouse events.
 	go trackAndPollMouse(stream)
 
-	// Block until the video feed ends.
 	<-waitc
 	stream.CloseSend()
 }
@@ -75,7 +71,6 @@ func (mt *MouseTracker) getButton() string {
 	return mt.mouseBtn
 }
 
-// loadTLSCredentials loads client TLS credentials and sets up the certificate pool.
 func loadTLSCredentials() (credentials.TransportCredentials, error) {
 	clientCert, err := tls.LoadX509KeyPair("client.crt", "client.key")
 	if err != nil {
@@ -100,7 +95,6 @@ func loadTLSCredentials() (credentials.TransportCredentials, error) {
 	return credentials.NewTLS(config), nil
 }
 
-// createFFPlayCommand sets up and starts FFplay for video playback.
 func createFFPlayCommand() (*exec.Cmd, io.WriteCloser, error) {
 	cmd := exec.Command("../bin/ffplay.exe",
 		"-rtbufsize", "128k",
@@ -164,14 +158,12 @@ func trackAndPollMouse(stream pb.RemoteControlService_GetFeedClient) {
 	evChan := hook.Start()
 	defer hook.End()
 
-	// Get screen dimensions (could be updated periodically if needed).
 	w, h := robotgo.GetScreenSize()
 
 	// Ticker for periodic polling.
 	ticker := time.NewTicker(time.Second / 30)
 	defer ticker.Stop()
 
-	// Initialize mouse tracker.
 	mt := &MouseTracker{}
 
 	for {
