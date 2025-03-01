@@ -1,62 +1,120 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/widget"
+	"image"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"sync"
 	"time"
 
-	"github.com/go-vgo/robotgo"
-	hook "github.com/robotn/gohook"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	pb "control_grpc/gen/proto"
+
+	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
+
+// mouseOverlay – прозрачный виджет, который реализует desktop.Hoverable.
+// Он содержит ссылку на gRPC‑стрим и отправляет события мыши серверу.
+type mouseOverlay struct {
+	widget.BaseWidget
+	stream pb.RemoteControlService_GetFeedClient
+}
+
+var mouseEvents = make(chan *pb.FeedRequest, 120)
+
+// newMouseOverlay создаёт новый экземпляр mouseOverlay с привязанным gRPC‑стримом.
+func newMouseOverlay(stream pb.RemoteControlService_GetFeedClient) *mouseOverlay {
+	mo := &mouseOverlay{stream: stream}
+	mo.ExtendBaseWidget(mo)
+	return mo
+}
+
+// CreateRenderer возвращает пустой рендерер, так как виджет прозрачный.
+func (mo *mouseOverlay) CreateRenderer() fyne.WidgetRenderer {
+	empty := container.NewWithoutLayout()
+	return widget.NewSimpleRenderer(empty)
+}
+
+// scaleCoordinates масштабирует координаты из текущего размера виджета в систему 1920×1080.
+func (mo *mouseOverlay) scaleCoordinates(pos fyne.Position) (float32, float32) {
+	sz := mo.Size()
+	if sz.Width == 0 || sz.Height == 0 {
+		return 0, 0
+	}
+	scaleX := 1920.0 / sz.Width
+	scaleY := 1080.0 / sz.Height
+	return pos.X * scaleX, pos.Y * scaleY
+}
+
+// sendMouseEvent формирует и отправляет сообщение о событии мыши через gRPC‑стрим.
+func (mo *mouseOverlay) sendMouseEvent(eventType, btn string, pos fyne.Position) {
+	sx, sy := mo.scaleCoordinates(pos)
+	log.Printf("Mouse Event: %s, X: %d, Y: %d", eventType, int(sx), int(sy))
+	req := &pb.FeedRequest{
+		Message:        "mouse_event",
+		MouseX:         int32(sx),
+		MouseY:         int32(sy),
+		MouseBtn:       btn,
+		MouseEventType: eventType,
+		ClientWidth:    1920,
+		ClientHeight:   1080,
+		Timestamp:      time.Now().UnixNano(),
+	}
+
+	// Отправка в канал вместо блокирующего stream.Send()
+	select {
+	case mouseEvents <- req:
+		log.Println("Mouse event sent:", req)
+	default:
+		log.Println("Mouse event dropped (channel full)")
+	}
+}
+
+// MouseIn вызывается, когда курсор входит в область виджета.
+func (mo *mouseOverlay) MouseIn(ev *desktop.MouseEvent) {
+	mo.sendMouseEvent("in", "", ev.Position)
+}
+
+// MouseMoved вызывается при перемещении курсора над виджетом.
+func (mo *mouseOverlay) MouseMoved(ev *desktop.MouseEvent) {
+	mo.sendMouseEvent("move", "", ev.Position)
+}
+
+// MouseOut вызывается, когда курсор покидает область виджета.
+func (mo *mouseOverlay) MouseOut() {
+	// Можно отправить событие "out" с нулевыми координатами
+	req := &pb.FeedRequest{
+		Message:        "mouse_event",
+		MouseX:         0,
+		MouseY:         0,
+		MouseBtn:       "",
+		MouseEventType: "out",
+		ClientWidth:    1920,
+		ClientHeight:   1080,
+		Timestamp:      time.Now().UnixNano(),
+	}
+	if err := mo.stream.Send(req); err != nil {
+		log.Printf("Ошибка отправки MouseOut: %v", err)
+	}
+}
 
 type MouseTracker struct {
 	mu       sync.Mutex
 	mouseBtn string
-}
-
-func main() {
-	tlsCredentials, err := loadTLSCredentials()
-	if err != nil {
-		log.Fatal("Cannot load TLS credentials: ", err)
-	}
-	opts := []grpc.DialOption{grpc.WithTransportCredentials(tlsCredentials)}
-
-	serverAddr := "localhost:32212"
-	conn, err := grpc.NewClient(serverAddr, opts...)
-	if err != nil {
-		log.Fatal("Could not connect to server")
-	}
-	defer conn.Close()
-
-	client := pb.NewRemoteControlServiceClient(conn)
-	stream, err := client.GetFeed(context.Background())
-	if err != nil {
-		log.Fatalf("Error creating stream: %v", err)
-	}
-
-	cmd, pipe, err := createFFPlayCommand()
-	if err != nil {
-		log.Fatal("Error setting up FFplay command: ", err)
-	}
-	defer cmd.Wait()
-
-	waitc := make(chan struct{})
-	go forwardVideoFeed(stream, pipe, waitc)
-
-	go trackAndPollMouse(stream)
-
-	<-waitc
-	stream.CloseSend()
 }
 
 func (mt *MouseTracker) setButton(btn string) {
@@ -71,133 +129,217 @@ func (mt *MouseTracker) getButton() string {
 	return mt.mouseBtn
 }
 
+func main() {
+	a := app.New()
+	w := a.NewWindow("Control GRPC client")
+
+	// Определяем размеры для 720p и fullscreen (1920x1080)
+	normalSize := fyne.NewSize(1280, 720)
+	fullSize := fyne.NewSize(1920, 1080)
+
+	// Создаем canvas для видео
+	imageCanvas := canvas.NewImageFromImage(image.NewRGBA(image.Rect(0, 0, 1920, 1080)))
+	imageCanvas.SetMinSize(normalSize)
+
+	// Настраиваем gRPC соединение
+	tlsCredentials, err := loadTLSCredentials()
+	if err != nil {
+		log.Fatal("Cannot load TLS credentials: ", err)
+	}
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(tlsCredentials)}
+	serverAddr := "localhost:32212"
+	conn, err := grpc.NewClient(serverAddr, opts...)
+	if err != nil {
+		log.Fatal("Could not connect to server: ", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewRemoteControlServiceClient(conn)
+	// Получаем двунаправленный поток
+	stream, err := client.GetFeed(context.Background())
+	if err != nil {
+		log.Fatalf("Error creating stream: %v", err)
+	}
+
+	initRequest := &pb.FeedRequest{
+		Message:      "init",
+		MouseX:       0,
+		MouseY:       0,
+		ClientWidth:  1920,
+		ClientHeight: 1080,
+		Timestamp:    time.Now().UnixNano(),
+	}
+	if err := stream.Send(initRequest); err != nil {
+		log.Fatalf("Ошибка отправки инициализации: %v", err)
+	}
+
+	// Создаем прозрачный оверлей, передавая ему ссылку на поток
+	overlay := newMouseOverlay(stream)
+
+	// Оборачиваем imageCanvas и overlay в контейнер, чтобы overlay располагался поверх изображения.
+	videoContainer := container.NewStack(imageCanvas, overlay)
+
+	// Горутина для обработки отправки координат
+	go func() {
+		for req := range mouseEvents {
+			if err := stream.Send(req); err != nil {
+				log.Printf("Ошибка отправки mouse event: %v", err)
+			}
+		}
+	}()
+
+	// Создаем метку и кнопку для переключения полноэкранного режима.
+	widgetLabel := widget.NewLabel("Video Feed:")
+	toggleButtonText := binding.NewString()
+	toggleButtonText.Set("Full screen")
+	isFull := false
+	toggleButton := widget.NewButton("", func() {
+		if !isFull {
+			w.SetFullScreen(true)
+			imageCanvas.SetMinSize(fullSize)
+			isFull = true
+			toggleButtonText.Set("Ne full screen")
+		} else {
+			w.SetFullScreen(false)
+			imageCanvas.SetMinSize(normalSize)
+			isFull = false
+			toggleButtonText.Set("Full screen")
+		}
+		w.Content().Refresh()
+	})
+	toggleButtonText.AddListener(binding.NewDataListener(func() {
+		text, _ := toggleButtonText.Get()
+		toggleButton.SetText(text)
+	}))
+
+	// Собираем верхнюю панель и основной контент.
+	topBar := container.NewHBox(widgetLabel, toggleButton)
+	content := container.NewBorder(topBar, nil, nil, nil, videoContainer)
+	w.SetContent(content)
+
+	ffmpegInputReader, ffmpegInputWriter := io.Pipe()
+	ffmpegOutputReader, ffmpegOutputWriter := io.Pipe()
+
+	go func() {
+		stderr := &bytes.Buffer{}
+		err := ffmpeg.Input("pipe:0", ffmpeg.KwArgs{
+			"format":             "mpegts",
+			"flags":              "low_delay",
+			"fflags":             "nobuffer+discardcorrupt",
+			"protocol_whitelist": "pipe",
+			"probesize":          "32",
+			"analyzeduration":    "0",
+			"hwaccel":            "d3d11va",
+		}).
+			Output("pipe:1", ffmpeg.KwArgs{
+				"format":    "rawvideo",
+				"pix_fmt":   "rgba",
+				"s":         "1920x1080",
+				"flags":     "low_delay",
+				"fflags":    "+nobuffer",
+				"avioflags": "direct",
+			}).
+			OverWriteOutput().
+			WithInput(ffmpegInputReader).
+			WithOutput(ffmpegOutputWriter).
+			WithErrorOutput(stderr).
+			Run()
+		if err != nil {
+			log.Printf("FFmpeg error: %v\nOutput: %s", err, stderr.String())
+			time.Sleep(time.Second)
+			main()
+		}
+	}()
+
+	frameImageData := make(chan image.Image, 30)
+	rawFrameBuffer := make(chan []byte, 5)
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			frameSize := 1920 * 1080 * 4
+			buf := make([]byte, frameSize)
+			for {
+				select {
+				case data := <-rawFrameBuffer:
+					copy(buf, data)
+					img := &image.RGBA{
+						Pix:    buf,
+						Stride: 1920 * 4,
+						Rect:   image.Rect(0, 0, 1920, 1080),
+					}
+					frameImageData <- img
+				}
+			}
+		}()
+	}
+
+	go func() {
+		frameSize := 1920 * 1080 * 4
+		buf := make([]byte, frameSize)
+		for {
+			_, err := io.ReadFull(ffmpegOutputReader, buf)
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				log.Println("Error reading frame:", err)
+				continue
+			}
+			copyBuf := make([]byte, frameSize)
+			copy(copyBuf, buf)
+			rawFrameBuffer <- copyBuf
+		}
+	}()
+
+	go forwardVideoFeed(stream, ffmpegInputWriter, frameImageData)
+	go drawFrames(imageCanvas, frameImageData)
+	// Дополнительно можно оставить вызов trackAndPollMouse для обработки системных событий мыши
+	// go trackAndPollMouse(stream)
+
+	w.ShowAndRun()
+}
+
+func drawFrames(imageCanvas *canvas.Image, frameImageChan chan image.Image) {
+	for img := range frameImageChan {
+		imageCanvas.Image = img
+		imageCanvas.Refresh()
+	}
+}
+
 func loadTLSCredentials() (credentials.TransportCredentials, error) {
 	clientCert, err := tls.LoadX509KeyPair("client.crt", "client.key")
 	if err != nil {
 		return nil, err
 	}
-
 	serverCACert, err := os.ReadFile("server.crt")
 	if err != nil {
 		return nil, err
 	}
-
 	serverCertPool := x509.NewCertPool()
 	if !serverCertPool.AppendCertsFromPEM(serverCACert) {
 		return nil, err
 	}
-
 	config := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      serverCertPool,
 	}
-
 	return credentials.NewTLS(config), nil
 }
 
-func createFFPlayCommand() (*exec.Cmd, io.WriteCloser, error) {
-	cmd := exec.Command("../bin/ffplay.exe",
-		"-rtbufsize", "128k",
-		"-an",
-		"-f", "h264",
-		"-probesize", "32",
-		"-sync", "ext",
-		"-fflags", "nobuffer",
-		"-i", "pipe:0")
-	pipe, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
-	}
-	return cmd, pipe, nil
-}
-
-// forwardVideoFeed continuously receives video frames from the server
-// and writes them to FFplay's pipe.
-func forwardVideoFeed(stream pb.RemoteControlService_GetFeedClient, pipe io.WriteCloser, waitc chan struct{}) {
+func forwardVideoFeed(stream pb.RemoteControlService_GetFeedClient, ffmpegInput io.Writer, frameImageData chan image.Image) {
+	defer close(frameImageData)
 	for {
-		receiveTime := time.Now()
 		frame, err := stream.Recv()
-		if err == io.EOF {
-			close(waitc)
+		if err != nil {
 			return
 		}
 		if err != nil {
-			log.Fatalf("Failed to receive feed: %v", err)
+			log.Printf("Failed to receive feed: %v", err)
+			return
 		}
-		if _, err := pipe.Write(frame.Data); err != nil {
-			log.Fatalf("Failed to send frame to FFmpeg: %v", err)
-		}
-		log.Printf("Time since last frame: %v, frame: %d", time.Since(receiveTime), frame.GetFrameNumber())
-	}
-}
-
-// sendMouseEvent sends a mouse event message over the gRPC stream.
-// It obtains the current mouse location at the time of sending.
-func sendMouseEvent(stream pb.RemoteControlService_GetFeedClient, eventType, btn string, w, h int) error {
-	mouseX, mouseY := robotgo.Location()
-	return stream.Send(&pb.FeedRequest{
-		Message:        "mouse_event",
-		Success:        true,
-		MouseX:         int32(mouseX),
-		MouseY:         int32(mouseY),
-		MouseBtn:       btn,
-		MouseEventType: eventType,
-		ClientWidth:    int32(w),
-		ClientHeight:   int32(h),
-		Timestamp:      time.Now().UnixNano(),
-	})
-}
-
-// trackAndPollMouse listens for mouse events (using gohook) and
-// periodically polls the current mouse location, sending updates to the server.
-func trackAndPollMouse(stream pb.RemoteControlService_GetFeedClient) {
-	// Start hook to capture mouse events.
-	evChan := hook.Start()
-	defer hook.End()
-
-	w, h := robotgo.GetScreenSize()
-
-	// Ticker for periodic polling.
-	ticker := time.NewTicker(time.Second / 30)
-	defer ticker.Stop()
-
-	mt := &MouseTracker{}
-
-	for {
-		select {
-		// Handle mouse events.
-		case ev, ok := <-evChan:
-			if !ok {
-				return
-			}
-			var eventType string
-			if ev.Kind == hook.MouseDown {
-				var btn string
-				switch ev.Button {
-				case hook.MouseMap["left"]:
-					btn = "left"
-				case hook.MouseMap["right"]:
-					btn = "right"
-				case hook.MouseMap["middle"]:
-					btn = "middle"
-				}
-				eventType = "press"
-				mt.setButton(btn)
-			} else if ev.Kind == hook.MouseUp {
-				eventType = "release"
-				mt.setButton("")
-			}
-			if err := sendMouseEvent(stream, eventType, mt.getButton(), w, h); err != nil {
-				log.Fatalf("Failed to send mouse event: %v", err)
-			}
-		// Periodically poll the mouse location.
-		case <-ticker.C:
-			if err := sendMouseEvent(stream, "mouse_event", mt.getButton(), w, h); err != nil {
-				log.Fatalf("Failed to send polled mouse data: %v", err)
-			}
+		if _, err := ffmpegInput.Write(frame.Data); err != nil {
+			log.Printf("Error writing to FFmpeg: %v", err)
+			return
 		}
 	}
 }

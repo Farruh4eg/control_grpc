@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-vgo/robotgo"
-	"github.com/pion/stun/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -47,7 +46,6 @@ func main() {
 	pb.RegisterRemoteControlServiceServer(grpcServer, &server{})
 	reflection.Register(grpcServer)
 
-	go performStun()
 	fmt.Printf("Server listening at %v\n", lis.Addr())
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
@@ -120,6 +118,7 @@ func getScaleFactors(serverWidth, serverHeight int, reqMsgInit *pb.FeedRequest) 
 func handleMouseEvents(mouseEvents chan *pb.FeedRequest, scaleX, scaleY float32) {
 	for reqMsg := range mouseEvents {
 		serverX, serverY := int(float32(reqMsg.GetMouseX())*scaleX), int(float32(reqMsg.GetMouseY())*scaleY)
+		log.Printf("Moving cursor to: X=%d, Y=%d", serverX, serverY)
 		robotgo.Move(serverX, serverY)
 		if reqMsg.GetMouseEventType() == "press" {
 			robotgo.MouseDown(reqMsg.GetMouseBtn())
@@ -150,7 +149,7 @@ func receiveMouseEvents(stream pb.RemoteControlService_GetFeedServer, mouseEvent
 
 func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *screen.ScreenCapture) error {
 	frameBuffer := make([]byte, 64*1024)
-	ticker := time.NewTicker(time.Second / 30)
+	ticker := time.NewTicker(time.Second / 60)
 	defer ticker.Stop()
 
 	frameCounter := 0
@@ -165,7 +164,8 @@ func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *scree
 			Data:        frameBuffer[:n],
 			FrameNumber: int32(frameCounter),
 			Timestamp:   time.Now().UnixNano(),
-			ContentType: "video/h264",
+			ContentType: "video/mp2t",
+			HwAccel:     screen.Accel,
 		})
 		if err != nil {
 			log.Printf("Error sending frame: %v", err)
@@ -174,32 +174,4 @@ func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *scree
 		frameCounter++
 	}
 	return nil
-}
-
-func performStun() {
-	beginTime := time.Now()
-	u, err := stun.ParseURI("stun:stun.l.google.com:19302")
-	if err != nil {
-		log.Printf("Stun parse error: %v", err)
-	}
-
-	c, err := stun.DialURI(u, &stun.DialConfig{})
-	if err != nil {
-		log.Printf("Stun dial error: %v", err)
-	}
-
-	message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-	if err := c.Start(message, func(res stun.Event) {
-		if res.Error != nil {
-			log.Printf("Stun start error: %v", res.Error)
-		}
-
-		var xorAddr stun.XORMappedAddress
-		if err := xorAddr.GetFrom(res.Message); err != nil {
-			log.Printf("XOR addr GetFrom error: %v", err)
-		}
-		log.Printf("My IP address is: %v:%v, stun performed in %v", xorAddr.IP, xorAddr.Port, time.Since(beginTime))
-	}); err != nil {
-		log.Printf("Error: %v", err)
-	}
 }

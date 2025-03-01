@@ -25,5 +25,6 @@ message FeedResponse {
   int32 frameNumber = 2;
   int64 timestamp = 3;
   string contentType = 4;
+  string hwAccel = 5;
 }
 

@@ -24,6 +24,8 @@ type Win32_VideoController struct {
 	Name string
 }
 
+var Accel string
+
 func NewScreenCapture() (*ScreenCapture, error) {
 	sc := &ScreenCapture{
 		restartCh: make(chan struct{}, 1),
@@ -42,23 +44,39 @@ func (sc *ScreenCapture) start() error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	accel, err := detectEncoder()
+	Accel, err := detectEncoder()
 	if err != nil {
 		return err
 	}
 
-	sc.cmd = exec.Command("../bin/ffmpeg.exe",
+	args := []string{
 		"-f", "gdigrab",
 		"-framerate", "30",
 		"-i", "desktop",
 		"-an",
 		"-vf", "scale=1920:1080",
-		"-c:v", accel,
+		"-c:v", Accel,
 		"-b:v", "3M",
-		"-f", "h264",
+		"-g", "30", // Smaller GOP size
+		"-tune", "zerolatency", // Zero latency tuning
+		"-flags", "+low_delay", // Low delay flags
+		"-fflags", "nobuffer", // Reduce buffering
+		"-f", "mpegts",
 		"-flush_packets", "1",
 		"pipe:1",
-	)
+	}
+
+	// Add hardware-specific low latency options
+	switch {
+	case strings.Contains(Accel, "nvenc"):
+		args = append(args, "-rc-lookahead", "0", "-strict", "2")
+	case strings.Contains(Accel, "amf"):
+		args = append(args, "-usage", "lowlatency")
+	case strings.Contains(Accel, "qsv"):
+		args = append(args, "-async_depth", "1")
+	}
+
+	sc.cmd = exec.Command("../bin/ffmpeg.exe", args...)
 
 	sc.output, err = sc.cmd.StdoutPipe()
 	if err != nil {
@@ -69,7 +87,7 @@ func (sc *ScreenCapture) start() error {
 		return err
 	}
 
-	log.Printf("Screen capture started with %s encoder", accel)
+	log.Printf("Screen capture started with %s encoder", Accel)
 	return nil
 }
 
