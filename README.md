@@ -1,8 +1,8 @@
 be sure to create a "bin" folder in the root of the project "control_grpc/bin" and place ffmpeg and ffplay there
-#Upd
+## Upd
 ffplay no longer needed. ffmpeg is still needed tho
 
-#Build
+# Build
 run
 ```bash
 buf generate
