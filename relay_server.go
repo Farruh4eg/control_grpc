@@ -48,7 +48,6 @@ func main() {
 			log.Printf("ERROR: Failed to accept control connection: %v", err)
 			continue
 		}
-		// Handle each control connection in its own goroutine.
 		go relay.handleControlConnection(conn)
 	}
 }
@@ -60,7 +59,7 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 	log.Printf("INFO: New control connection from: %s", remoteAddr)
 	reader := bufio.NewReader(conn)
 
-	var registeredHostID string // If this control connection successfully registers a host
+	var registeredHostID string
 
 	for {
 		message, err := reader.ReadString('\n')
@@ -70,10 +69,9 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 			} else {
 				log.Printf("INFO: Control connection %s closed (EOF)", remoteAddr)
 			}
-			// Cleanup if this was a registered host's control connection
 			if registeredHostID != "" {
 				r.mu.Lock()
-				if r.hostControlConns[registeredHostID] == conn { // Check if it's still the same connection
+				if r.hostControlConns[registeredHostID] == conn {
 					log.Printf("INFO: Host '%s' (control conn %s) disconnected. Removing from registry.", registeredHostID, remoteAddr)
 					delete(r.hostControlConns, registeredHostID)
 				}
@@ -92,26 +90,24 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 		log.Printf("DEBUG: Control command from %s: %s, Args: %v", remoteAddr, command, parts[1:])
 
 		switch command {
-		case "REGISTER_HOST": // Expected from host's sidecar: REGISTER_HOST <host_id>
+		case "REGISTER_HOST":
 			if len(parts) < 2 {
 				fmt.Fprintln(conn, "ERROR Invalid REGISTER_HOST. Usage: REGISTER_HOST <host_id>")
 				continue
 			}
 			hostID := parts[1]
 			r.mu.Lock()
-			if _, exists := r.hostControlConns[hostID]; exists {
-				// Potentially close the old connection or disallow if active.
-				// For now, allow re-registration to update the connection.
-				log.Printf("WARN: Host ID '%s' re-registering. Old control conn: %s, New: %s", hostID, r.hostControlConns[hostID].RemoteAddr(), remoteAddr)
-				// r.hostControlConns[hostID].Close() // Optionally close the old one
+			if oldConn, exists := r.hostControlConns[hostID]; exists {
+				log.Printf("WARN: Host ID '%s' re-registering. Old control conn: %s, New: %s", hostID, oldConn.RemoteAddr(), remoteAddr)
+				// oldConn.Close() // Optionally close the old one
 			}
 			r.hostControlConns[hostID] = conn
-			registeredHostID = hostID // Mark this connection as belonging to this hostID
+			registeredHostID = hostID
 			r.mu.Unlock()
 			log.Printf("INFO: Host '%s' registered with control connection %s", hostID, remoteAddr)
 			fmt.Fprintf(conn, "HOST_REGISTERED %s\n", hostID)
 
-		case "INITIATE_CLIENT_SESSION": // Expected from launcher: INITIATE_CLIENT_SESSION <target_host_id>
+		case "INITIATE_CLIENT_SESSION":
 			if len(parts) < 2 {
 				fmt.Fprintln(conn, "ERROR Invalid INITIATE_CLIENT_SESSION. Usage: INITIATE_CLIENT_SESSION <target_host_id>")
 				continue
@@ -120,7 +116,7 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 
 			r.mu.Lock()
 			hostControlConn, hostIsRegistered := r.hostControlConns[targetHostID]
-			r.mu.Unlock() // Unlock early before potentially blocking operations like net.Listen
+			r.mu.Unlock()
 
 			if !hostIsRegistered {
 				log.Printf("WARN: Target host '%s' not found for client session from %s", targetHostID, remoteAddr)
@@ -129,50 +125,58 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 			}
 
 			sessionToken := uuid.New().String()
-			dataListener, err := net.Listen("tcp", ":0") // OS chooses a free port for data
+			dataListener, err := net.Listen("tcp", ":0") // OS chooses a free port
 			if err != nil {
 				log.Printf("ERROR: Failed to create dynamic data listener for session %s: %v", sessionToken, err)
 				fmt.Fprintf(conn, "ERROR_RELAY_INTERNAL Failed to create data port\n")
 				continue
 			}
-			dynamicRelayAddr := dataListener.Addr().String()
-			log.Printf("INFO: Session %s for host '%s': Dynamic data listener at %s", sessionToken, targetHostID, dynamicRelayAddr)
 
-			// Tell client (launcher) where client.exe should connect
-			fmt.Fprintf(conn, "SESSION_READY %s %s\n", dynamicRelayAddr, sessionToken)
-			log.Printf("INFO: Session %s: Notified launcher %s to have client.exe connect to %s", sessionToken, remoteAddr, dynamicRelayAddr)
+			// Extract the port from the listener's address
+			tcpAddr, ok := dataListener.Addr().(*net.TCPAddr)
+			if !ok {
+				log.Printf("ERROR: Session %s: Could not get TCP address from data listener.", sessionToken)
+				fmt.Fprintf(conn, "ERROR_RELAY_INTERNAL Failed to get data port details\n")
+				dataListener.Close()
+				continue
+			}
+			dynamicPort := tcpAddr.Port
+			log.Printf("INFO: Session %s for host '%s': Dynamic data listener on port %d (will be combined with relay's public IP by launcher)", sessionToken, targetHostID, dynamicPort)
 
-			// Tell target host (via its control conn) to connect its proxy to the dynamic data port
-			// Ensure hostControlConn is still valid and active before writing
+			// Tell client (launcher) the DYNAMIC PORT and session token.
+			// The launcher will combine this port with the relay's public IP it already knows.
+			fmt.Fprintf(conn, "SESSION_READY %d %s\n", dynamicPort, sessionToken) // Send only port
+			log.Printf("INFO: Session %s: Notified launcher %s to have client.exe connect to relay's public IP on port %d", sessionToken, remoteAddr, dynamicPort)
+
+			// Tell target host (via its control conn) to connect its proxy to the relay's public IP and dynamic data port
+			// The host will also need to know the relay's public IP. For now, it uses relayServerAddr flag.
+			// The CREATE_TUNNEL command will now send the port. The host proxy will combine it with its configured relayServerAddr's host part.
 			if hostControlConn != nil {
-				_, errSend := fmt.Fprintf(hostControlConn, "CREATE_TUNNEL %s %s\n", dynamicRelayAddr, sessionToken)
+				// The relay server's public IP is what the host used in its -relayServer flag.
+				// It will combine the host part of that with this new port.
+				// So, we only need to send the port to the host as well.
+				_, errSend := fmt.Fprintf(hostControlConn, "CREATE_TUNNEL %d %s\n", dynamicPort, sessionToken)
 				if errSend != nil {
-					log.Printf("ERROR: Session %s: Failed to send CREATE_TUNNEL to host '%s' (%s): %v. Aborting session.", sessionToken, targetHostID, hostControlConn.RemoteAddr(), errSend)
-					fmt.Fprintf(conn, "ERROR_RELAY_INTERNAL Failed to notify host. Host might be disconnected.\n")
-					dataListener.Close() // Clean up the listener
-					// Consider removing host from registry if its control conn failed
+					log.Printf("ERROR: Session %s: Failed to send CREATE_TUNNEL (port %d) to host '%s' (%s): %v. Aborting session.", sessionToken, dynamicPort, targetHostID, hostControlConn.RemoteAddr(), errSend)
+					fmt.Fprintf(conn, "ERROR_RELAY_INTERNAL Failed to notify host.\n")
+					dataListener.Close()
 					r.mu.Lock()
-					if r.hostControlConns[targetHostID] == hostControlConn { // If it's the same problematic conn
+					if r.hostControlConns[targetHostID] == hostControlConn {
 						delete(r.hostControlConns, targetHostID)
-						log.Printf("INFO: Removed host '%s' due to control connection error during session setup.", targetHostID)
+						log.Printf("INFO: Removed host '%s' due to control connection error.", targetHostID)
 					}
 					r.mu.Unlock()
-					continue // Abort this session setup
+					continue
 				}
-				log.Printf("INFO: Session %s: Notified host '%s' (control %s) to create tunnel to %s", sessionToken, targetHostID, hostControlConn.RemoteAddr(), dynamicRelayAddr)
-			} else { // Should not happen if hostIsRegistered and hostControlConn was retrieved
-				log.Printf("CRITICAL: Session %s: Host '%s' was registered but its control connection is nil. Aborting.", sessionToken, targetHostID)
+				log.Printf("INFO: Session %s: Notified host '%s' (control %s) to create tunnel to relay's public IP on port %d", sessionToken, targetHostID, hostControlConn.RemoteAddr(), dynamicPort)
+			} else {
+				log.Printf("CRITICAL: Session %s: Host '%s' registered but control connection is nil. Aborting.", sessionToken, targetHostID)
 				fmt.Fprintf(conn, "ERROR_RELAY_INTERNAL Host control connection issue.\n")
 				dataListener.Close()
 				continue
 			}
 
-			// Goroutine to wait for client.exe and host's data proxy connection on the dynamic port
-			go r.manageDataSession(dataListener, sessionToken, targetHostID)
-			// After sending SESSION_READY, this control connection from the launcher has served its purpose for this request.
-			// It could be closed or kept open for more requests from the same launcher.
-			// For simplicity, we'll let the loop continue. If launcher closes, EOF will handle it.
-
+			go r.manageDataSession(dataListener, sessionToken, targetHostID, dynamicPort) // Pass port for logging
 		default:
 			log.Printf("WARN: Unknown control command from %s: '%s'", remoteAddr, message)
 			fmt.Fprintf(conn, "ERROR Unknown command: %s\n", command)
@@ -180,20 +184,18 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 	}
 }
 
-// manageDataSession waits for two connections (one from client.exe, one from host's proxy)
-// on the dataListener, identifies them using the sessionToken, and then relays traffic.
-func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken string, hostID string) {
+// manageDataSession waits for two connections on the dataListener.
+func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken string, hostID string, port int) {
 	defer dataListener.Close()
-	log.Printf("INFO: Session %s (Host '%s'): Waiting for data connections on %s (timeout: %s)", sessionToken, hostID, dataListener.Addr(), dataConnTimeout*2) // Total timeout for both
+	log.Printf("INFO: Session %s (Host '%s'): Waiting for data connections on port %d (timeout: %s)", sessionToken, hostID, port, dataConnTimeout*2)
 
 	var clientAppConn, hostProxyConn net.Conn
 	var wg sync.WaitGroup
-	wg.Add(2) // Expecting two connections
+	wg.Add(2)
 
 	connChan := make(chan net.Conn, 2)
-	errChan := make(chan error, 2) // To catch errors from Accept
+	errChan := make(chan error, 2)
 
-	// Goroutine to accept the first connection
 	go func() {
 		defer wg.Done()
 		conn, err := dataListener.Accept()
@@ -204,7 +206,6 @@ func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken 
 		connChan <- conn
 	}()
 
-	// Goroutine to accept the second connection
 	go func() {
 		defer wg.Done()
 		conn, err := dataListener.Accept()
@@ -215,8 +216,7 @@ func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken 
 		connChan <- conn
 	}()
 
-	// Wait for both Accept goroutines to finish or timeout
-	acceptTimeout := time.After(dataConnTimeout * 2) // Total time to get both connections
+	acceptTimeout := time.After(dataConnTimeout * 2)
 	var acceptedConns []net.Conn
 
 LoopAccept:
@@ -225,49 +225,39 @@ LoopAccept:
 		case conn := <-connChan:
 			acceptedConns = append(acceptedConns, conn)
 		case err := <-errChan:
-			// Check if the error is due to listener being closed, which might happen if session is aborted elsewhere
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				log.Printf("WARN: Session %s: Temporary error accepting data connection: %v. Retrying accept might be needed if not closing.", sessionToken, err)
-				i-- // Potentially retry, though simple Accept doesn't retry.
-				continue
-			}
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				log.Printf("INFO: Session %s: Data listener was closed while waiting for connections.", sessionToken)
+				log.Printf("INFO: Session %s: Data listener was closed.", sessionToken)
 			} else {
 				log.Printf("ERROR: Session %s: Error accepting data connection: %v", sessionToken, err)
 			}
-			break LoopAccept // Stop trying to accept
+			break LoopAccept
 		case <-acceptTimeout:
-			log.Printf("WARN: Session %s: Timed out waiting for all data connections.", sessionToken)
+			log.Printf("WARN: Session %s: Timed out waiting for all data connections on port %d.", sessionToken, port)
 			break LoopAccept
 		}
 	}
+	wg.Wait()
 
-	wg.Wait() // Ensure Accept goroutines complete
-
-	// Identify the accepted connections
 	for _, conn := range acceptedConns {
-		conn.SetReadDeadline(time.Now().Add(identTimeout)) // Deadline for sending identification
+		conn.SetReadDeadline(time.Now().Add(identTimeout))
 		identifier, err := bufio.NewReader(conn).ReadString('\n')
-		conn.SetReadDeadline(time.Time{}) // Clear deadline
+		conn.SetReadDeadline(time.Time{})
 
 		if err != nil {
-			log.Printf("WARN: Session %s: Failed to read identification from %s: %v. Closing it.", sessionToken, conn.RemoteAddr(), err)
+			log.Printf("WARN: Session %s: Failed to read identification from %s on port %d: %v. Closing it.", sessionToken, conn.RemoteAddr(), port, err)
 			conn.Close()
 			continue
 		}
-
 		identifier = strings.TrimSpace(identifier)
-		parts := strings.Fields(identifier) // Expect: SESSION_TOKEN <token> <CLIENT_APP|HOST_PROXY>
+		parts := strings.Fields(identifier)
 
 		if len(parts) != 3 || parts[0] != "SESSION_TOKEN" || parts[1] != sessionToken {
-			log.Printf("WARN: Session %s: Invalid identification from %s: '%s'. Closing it.", sessionToken, conn.RemoteAddr(), identifier)
+			log.Printf("WARN: Session %s: Invalid identification from %s on port %d: '%s'. Closing it.", sessionToken, conn.RemoteAddr(), port, identifier)
 			conn.Close()
 			continue
 		}
-
 		sourceType := parts[2]
-		log.Printf("INFO: Session %s: Connection %s identified as %s", sessionToken, conn.RemoteAddr(), sourceType)
+		log.Printf("INFO: Session %s: Connection %s on port %d identified as %s", sessionToken, conn.RemoteAddr(), port, sourceType)
 
 		if sourceType == "CLIENT_APP" {
 			if clientAppConn != nil {
@@ -289,10 +279,9 @@ LoopAccept:
 		}
 	}
 
-	// Check if we got both connections identified correctly
 	if clientAppConn == nil || hostProxyConn == nil {
-		log.Printf("WARN: Session %s: Failed to establish complete data relay. Client connected: %t, Host proxy connected: %t. Aborting session.",
-			sessionToken, clientAppConn != nil, hostProxyConn != nil)
+		log.Printf("WARN: Session %s: Failed to establish complete data relay on port %d. Client connected: %t, Host proxy connected: %t. Aborting.",
+			sessionToken, port, clientAppConn != nil, hostProxyConn != nil)
 		if clientAppConn != nil {
 			clientAppConn.Close()
 		}
@@ -302,37 +291,33 @@ LoopAccept:
 		return
 	}
 
-	log.Printf("INFO: Session %s: Data connections established. Relaying between CLIENT_APP (%s) and HOST_PROXY (%s).",
-		sessionToken, clientAppConn.RemoteAddr(), hostProxyConn.RemoteAddr())
+	log.Printf("INFO: Session %s: Data connections established on port %d. Relaying between CLIENT_APP (%s) and HOST_PROXY (%s).",
+		sessionToken, port, clientAppConn.RemoteAddr(), hostProxyConn.RemoteAddr())
 
-	// Start relaying traffic
 	var relayWg sync.WaitGroup
 	relayWg.Add(2)
-
 	go func() {
 		defer relayWg.Done()
 		defer clientAppConn.Close()
 		defer hostProxyConn.Close()
-		written, err := io.Copy(hostProxyConn, clientAppConn) // client -> host
+		written, err := io.Copy(hostProxyConn, clientAppConn)
 		if err != nil && err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 			log.Printf("ERROR: Session %s: Copying CLIENT_APP to HOST_PROXY: %v (bytes: %d)", sessionToken, err, written)
 		} else {
 			log.Printf("INFO: Session %s: CLIENT_APP to HOST_PROXY stream ended. Bytes: %d", sessionToken, written)
 		}
 	}()
-
 	go func() {
 		defer relayWg.Done()
 		defer hostProxyConn.Close()
 		defer clientAppConn.Close()
-		written, err := io.Copy(clientAppConn, hostProxyConn) // host -> client
+		written, err := io.Copy(clientAppConn, hostProxyConn)
 		if err != nil && err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 			log.Printf("ERROR: Session %s: Copying HOST_PROXY to CLIENT_APP: %v (bytes: %d)", sessionToken, err, written)
 		} else {
 			log.Printf("INFO: Session %s: HOST_PROXY to CLIENT_APP stream ended. Bytes: %d", sessionToken, written)
 		}
 	}()
-
 	relayWg.Wait()
-	log.Printf("INFO: Session %s: Relaying ended.", sessionToken)
+	log.Printf("INFO: Session %s: Relaying ended for port %d.", sessionToken, port)
 }
