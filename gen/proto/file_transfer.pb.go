@@ -10,6 +10,7 @@ import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
+	sync "sync"
 	unsafe "unsafe"
 )
 
@@ -20,24 +21,398 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type FSNode_NodeType int32
+
+const (
+	FSNode_FOLDER FSNode_NodeType = 0
+	FSNode_FILE   FSNode_NodeType = 1
+)
+
+// Enum value maps for FSNode_NodeType.
+var (
+	FSNode_NodeType_name = map[int32]string{
+		0: "FOLDER",
+		1: "FILE",
+	}
+	FSNode_NodeType_value = map[string]int32{
+		"FOLDER": 0,
+		"FILE":   1,
+	}
+)
+
+func (x FSNode_NodeType) Enum() *FSNode_NodeType {
+	p := new(FSNode_NodeType)
+	*p = x
+	return p
+}
+
+func (x FSNode_NodeType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FSNode_NodeType) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_file_transfer_proto_enumTypes[0].Descriptor()
+}
+
+func (FSNode_NodeType) Type() protoreflect.EnumType {
+	return &file_proto_file_transfer_proto_enumTypes[0]
+}
+
+func (x FSNode_NodeType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FSNode_NodeType.Descriptor instead.
+func (FSNode_NodeType) EnumDescriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{1, 0}
+}
+
+type FSRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Path to list. Empty means list roots (drives/root dir).
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FSRequest) Reset() {
+	*x = FSRequest{}
+	mi := &file_proto_file_transfer_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FSRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FSRequest) ProtoMessage() {}
+
+func (x *FSRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_transfer_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FSRequest.ProtoReflect.Descriptor instead.
+func (*FSRequest) Descriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *FSRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type FSNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`                                    // Full path of the node
+	Type          FSNode_NodeType        `protobuf:"varint,2,opt,name=type,proto3,enum=control_grpc.FSNode_NodeType" json:"type,omitempty"` // Type of the node (FOLDER or FILE)
+	HasChildren   bool                   `protobuf:"varint,3,opt,name=has_children,json=hasChildren,proto3" json:"has_children,omitempty"`  // Relevant for FOLDER type. True if directory is not empty.
+	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`                                   // Add file size
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FSNode) Reset() {
+	*x = FSNode{}
+	mi := &file_proto_file_transfer_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FSNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FSNode) ProtoMessage() {}
+
+func (x *FSNode) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_transfer_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FSNode.ProtoReflect.Descriptor instead.
+func (*FSNode) Descriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *FSNode) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *FSNode) GetType() FSNode_NodeType {
+	if x != nil {
+		return x.Type
+	}
+	return FSNode_FOLDER
+}
+
+func (x *FSNode) GetHasChildren() bool {
+	if x != nil {
+		return x.HasChildren
+	}
+	return false
+}
+
+func (x *FSNode) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+type FSResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestedPath string                 `protobuf:"bytes,1,opt,name=requested_path,json=requestedPath,proto3" json:"requested_path,omitempty"` // Echo back the path this response is for
+	Nodes         []*FSNode              `protobuf:"bytes,2,rep,name=nodes,proto3" json:"nodes,omitempty"`                                      // List of nodes found at the path
+	ErrorMessage  string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`    // For reporting errors like "Access Denied"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FSResponse) Reset() {
+	*x = FSResponse{}
+	mi := &file_proto_file_transfer_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FSResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FSResponse) ProtoMessage() {}
+
+func (x *FSResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_transfer_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FSResponse.ProtoReflect.Descriptor instead.
+func (*FSResponse) Descriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *FSResponse) GetRequestedPath() string {
+	if x != nil {
+		return x.RequestedPath
+	}
+	return ""
+}
+
+func (x *FSResponse) GetNodes() []*FSNode {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+func (x *FSResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+type FileRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Path of the file or folder to download
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileRequest) Reset() {
+	*x = FileRequest{}
+	mi := &file_proto_file_transfer_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileRequest) ProtoMessage() {}
+
+func (x *FileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_transfer_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileRequest.ProtoReflect.Descriptor instead.
+func (*FileRequest) Descriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *FileRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type FileChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       []byte                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"` // Chunk of file or zip data
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileChunk) Reset() {
+	*x = FileChunk{}
+	mi := &file_proto_file_transfer_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileChunk) ProtoMessage() {}
+
+func (x *FileChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_file_transfer_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileChunk.ProtoReflect.Descriptor instead.
+func (*FileChunk) Descriptor() ([]byte, []int) {
+	return file_proto_file_transfer_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *FileChunk) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
 var File_proto_file_transfer_proto protoreflect.FileDescriptor
 
 var file_proto_file_transfer_proto_rawDesc = string([]byte{
 	0x0a, 0x19, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x66, 0x69, 0x6c, 0x65, 0x5f, 0x74, 0x72, 0x61,
 	0x6e, 0x73, 0x66, 0x65, 0x72, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x0c, 0x63, 0x6f, 0x6e,
-	0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x32, 0x15, 0x0a, 0x13, 0x46, 0x69, 0x6c,
-	0x65, 0x54, 0x72, 0x61, 0x6e, 0x73, 0x66, 0x65, 0x72, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65,
-	0x42, 0x14, 0x5a, 0x12, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63,
-	0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x22, 0x1f, 0x0a, 0x09, 0x46, 0x53, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x22, 0xa8, 0x01, 0x0a, 0x06, 0x46,
+	0x53, 0x4e, 0x6f, 0x64, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x12, 0x31, 0x0a, 0x04, 0x74, 0x79, 0x70,
+	0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x1d, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f,
+	0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x53, 0x4e, 0x6f, 0x64, 0x65, 0x2e, 0x4e, 0x6f,
+	0x64, 0x65, 0x54, 0x79, 0x70, 0x65, 0x52, 0x04, 0x74, 0x79, 0x70, 0x65, 0x12, 0x21, 0x0a, 0x0c,
+	0x68, 0x61, 0x73, 0x5f, 0x63, 0x68, 0x69, 0x6c, 0x64, 0x72, 0x65, 0x6e, 0x18, 0x03, 0x20, 0x01,
+	0x28, 0x08, 0x52, 0x0b, 0x68, 0x61, 0x73, 0x43, 0x68, 0x69, 0x6c, 0x64, 0x72, 0x65, 0x6e, 0x12,
+	0x12, 0x0a, 0x04, 0x73, 0x69, 0x7a, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28, 0x03, 0x52, 0x04, 0x73,
+	0x69, 0x7a, 0x65, 0x22, 0x20, 0x0a, 0x08, 0x4e, 0x6f, 0x64, 0x65, 0x54, 0x79, 0x70, 0x65, 0x12,
+	0x0a, 0x0a, 0x06, 0x46, 0x4f, 0x4c, 0x44, 0x45, 0x52, 0x10, 0x00, 0x12, 0x08, 0x0a, 0x04, 0x46,
+	0x49, 0x4c, 0x45, 0x10, 0x01, 0x22, 0x84, 0x01, 0x0a, 0x0a, 0x46, 0x53, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x25, 0x0a, 0x0e, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x65,
+	0x64, 0x5f, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x72, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x65, 0x64, 0x50, 0x61, 0x74, 0x68, 0x12, 0x2a, 0x0a, 0x05, 0x6e,
+	0x6f, 0x64, 0x65, 0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x14, 0x2e, 0x63, 0x6f, 0x6e,
+	0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x53, 0x4e, 0x6f, 0x64, 0x65,
+	0x52, 0x05, 0x6e, 0x6f, 0x64, 0x65, 0x73, 0x12, 0x23, 0x0a, 0x0d, 0x65, 0x72, 0x72, 0x6f, 0x72,
+	0x5f, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0c,
+	0x65, 0x72, 0x72, 0x6f, 0x72, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x22, 0x21, 0x0a, 0x0b,
+	0x46, 0x69, 0x6c, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70,
+	0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x22,
+	0x25, 0x0a, 0x09, 0x46, 0x69, 0x6c, 0x65, 0x43, 0x68, 0x75, 0x6e, 0x6b, 0x12, 0x18, 0x0a, 0x07,
+	0x63, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x07, 0x63,
+	0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x32, 0xe4, 0x01, 0x0a, 0x13, 0x46, 0x69, 0x6c, 0x65, 0x54,
+	0x72, 0x61, 0x6e, 0x73, 0x66, 0x65, 0x72, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x3a,
+	0x0a, 0x05, 0x47, 0x65, 0x74, 0x46, 0x53, 0x12, 0x17, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f,
+	0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x53, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
+	0x1a, 0x18, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e,
+	0x46, 0x53, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x44, 0x0a, 0x0c, 0x44, 0x6f,
+	0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x46, 0x69, 0x6c, 0x65, 0x12, 0x19, 0x2e, 0x63, 0x6f, 0x6e,
+	0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x17, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x5f,
+	0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x43, 0x68, 0x75, 0x6e, 0x6b, 0x30, 0x01,
+	0x12, 0x4b, 0x0a, 0x13, 0x44, 0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64, 0x46, 0x6f, 0x6c, 0x64,
+	0x65, 0x72, 0x41, 0x73, 0x5a, 0x69, 0x70, 0x12, 0x19, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f,
+	0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65,
+	0x73, 0x74, 0x1a, 0x17, 0x2e, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70,
+	0x63, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x43, 0x68, 0x75, 0x6e, 0x6b, 0x30, 0x01, 0x42, 0x18, 0x5a,
+	0x16, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x6f, 0x6c, 0x5f, 0x67, 0x72, 0x70, 0x63, 0x2f, 0x67, 0x65,
+	0x6e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 })
 
-var file_proto_file_transfer_proto_goTypes = []any{}
+var (
+	file_proto_file_transfer_proto_rawDescOnce sync.Once
+	file_proto_file_transfer_proto_rawDescData []byte
+)
+
+func file_proto_file_transfer_proto_rawDescGZIP() []byte {
+	file_proto_file_transfer_proto_rawDescOnce.Do(func() {
+		file_proto_file_transfer_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_file_transfer_proto_rawDesc), len(file_proto_file_transfer_proto_rawDesc)))
+	})
+	return file_proto_file_transfer_proto_rawDescData
+}
+
+var file_proto_file_transfer_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_file_transfer_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_file_transfer_proto_goTypes = []any{
+	(FSNode_NodeType)(0), // 0: control_grpc.FSNode.NodeType
+	(*FSRequest)(nil),    // 1: control_grpc.FSRequest
+	(*FSNode)(nil),       // 2: control_grpc.FSNode
+	(*FSResponse)(nil),   // 3: control_grpc.FSResponse
+	(*FileRequest)(nil),  // 4: control_grpc.FileRequest
+	(*FileChunk)(nil),    // 5: control_grpc.FileChunk
+}
 var file_proto_file_transfer_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: control_grpc.FSNode.type:type_name -> control_grpc.FSNode.NodeType
+	2, // 1: control_grpc.FSResponse.nodes:type_name -> control_grpc.FSNode
+	1, // 2: control_grpc.FileTransferService.GetFS:input_type -> control_grpc.FSRequest
+	4, // 3: control_grpc.FileTransferService.DownloadFile:input_type -> control_grpc.FileRequest
+	4, // 4: control_grpc.FileTransferService.DownloadFolderAsZip:input_type -> control_grpc.FileRequest
+	3, // 5: control_grpc.FileTransferService.GetFS:output_type -> control_grpc.FSResponse
+	5, // 6: control_grpc.FileTransferService.DownloadFile:output_type -> control_grpc.FileChunk
+	5, // 7: control_grpc.FileTransferService.DownloadFolderAsZip:output_type -> control_grpc.FileChunk
+	5, // [5:8] is the sub-list for method output_type
+	2, // [2:5] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proto_file_transfer_proto_init() }
@@ -50,13 +425,15 @@ func file_proto_file_transfer_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_file_transfer_proto_rawDesc), len(file_proto_file_transfer_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   0,
+			NumEnums:      1,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_proto_file_transfer_proto_goTypes,
 		DependencyIndexes: file_proto_file_transfer_proto_depIdxs,
+		EnumInfos:         file_proto_file_transfer_proto_enumTypes,
+		MessageInfos:      file_proto_file_transfer_proto_msgTypes,
 	}.Build()
 	File_proto_file_transfer_proto = out.File
 	file_proto_file_transfer_proto_goTypes = nil

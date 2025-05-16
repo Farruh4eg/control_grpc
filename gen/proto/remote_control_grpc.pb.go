@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	RemoteControlService_GetFeed_FullMethodName = "/control_grpc.RemoteControlService/GetFeed"
+	RemoteControlService_Ping_FullMethodName    = "/control_grpc.RemoteControlService/Ping"
 )
 
 // RemoteControlServiceClient is the client API for RemoteControlService service.
@@ -27,6 +28,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type RemoteControlServiceClient interface {
 	GetFeed(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[FeedRequest, FeedResponse], error)
+	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
 }
 
 type remoteControlServiceClient struct {
@@ -50,11 +52,22 @@ func (c *remoteControlServiceClient) GetFeed(ctx context.Context, opts ...grpc.C
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RemoteControlService_GetFeedClient = grpc.BidiStreamingClient[FeedRequest, FeedResponse]
 
+func (c *remoteControlServiceClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PingResponse)
+	err := c.cc.Invoke(ctx, RemoteControlService_Ping_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RemoteControlServiceServer is the server API for RemoteControlService service.
 // All implementations should embed UnimplementedRemoteControlServiceServer
 // for forward compatibility.
 type RemoteControlServiceServer interface {
 	GetFeed(grpc.BidiStreamingServer[FeedRequest, FeedResponse]) error
+	Ping(context.Context, *PingRequest) (*PingResponse, error)
 }
 
 // UnimplementedRemoteControlServiceServer should be embedded to have
@@ -66,6 +79,9 @@ type UnimplementedRemoteControlServiceServer struct{}
 
 func (UnimplementedRemoteControlServiceServer) GetFeed(grpc.BidiStreamingServer[FeedRequest, FeedResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method GetFeed not implemented")
+}
+func (UnimplementedRemoteControlServiceServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Ping not implemented")
 }
 func (UnimplementedRemoteControlServiceServer) testEmbeddedByValue() {}
 
@@ -94,13 +110,36 @@ func _RemoteControlService_GetFeed_Handler(srv interface{}, stream grpc.ServerSt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RemoteControlService_GetFeedServer = grpc.BidiStreamingServer[FeedRequest, FeedResponse]
 
+func _RemoteControlService_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteControlServiceServer).Ping(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteControlService_Ping_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteControlServiceServer).Ping(ctx, req.(*PingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RemoteControlService_ServiceDesc is the grpc.ServiceDesc for RemoteControlService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var RemoteControlService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "control_grpc.RemoteControlService",
 	HandlerType: (*RemoteControlServiceServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Ping",
+			Handler:    _RemoteControlService_Ping_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "GetFeed",

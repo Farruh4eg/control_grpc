@@ -1,8 +1,47 @@
 syntax = "proto3";
 
 package control_grpc;
-option go_package = "control_grpc/proto";
+
+option go_package = "control_grpc/gen/proto";
 
 service FileTransferService {
-  
+  // Request content for a specific path. Empty path means roots.
+  rpc GetFS(FSRequest) returns (FSResponse);
+
+  // Download a file from the server.
+  rpc DownloadFile(FileRequest) returns (stream FileChunk);
+
+  // Download a folder from the server as a zip archive.
+  rpc DownloadFolderAsZip(FileRequest) returns (stream FileChunk);
+}
+
+message FSRequest {
+  string path = 1; // Path to list. Empty means list roots (drives/root dir).
+}
+
+message FSNode {
+  enum NodeType {
+    FOLDER = 0;
+    FILE = 1;
+  }
+  string path = 1; // Full path of the node
+  NodeType type = 2; // Type of the node (FOLDER or FILE)
+  bool has_children = 3; // Relevant for FOLDER type. True if directory is not empty.
+  int64 size = 4; // Add file size
+  // Consider adding modtime etc. later if needed
+  // int64 modified_time = 5; // e.g., Unix timestamp
+}
+
+message FSResponse {
+  string requested_path = 1; // Echo back the path this response is for
+  repeated FSNode nodes = 2; // List of nodes found at the path
+  string error_message = 3; // For reporting errors like "Access Denied"
+}
+
+message FileRequest {
+  string path = 1; // Path of the file or folder to download
+}
+
+message FileChunk {
+  bytes content = 1; // Chunk of file or zip data
 }

@@ -76,7 +76,7 @@ func (sc *ScreenCapture) start() error {
 		args = append(args, "-async_depth", "1")
 	}
 
-	sc.cmd = exec.Command("../bin/ffmpeg.exe", args...)
+	sc.cmd = exec.Command("ffmpeg", args...)
 
 	sc.output, err = sc.cmd.StdoutPipe()
 	if err != nil {

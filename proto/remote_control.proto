@@ -5,7 +5,9 @@ option go_package = "control_grpc/proto";
 
 service RemoteControlService {
   rpc GetFeed (stream FeedRequest) returns (stream FeedResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
 }
+
 
 message FeedRequest {
   bool success = 1;
@@ -28,3 +30,10 @@ message FeedResponse {
   string hwAccel = 5;
 }
 
+message PingRequest {
+  int64 client_timestamp_nano = 1;
+}
+
+message PingResponse {
+  int64 client_timestamp_nano = 1; // Echoed from request
+}
