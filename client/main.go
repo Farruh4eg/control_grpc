@@ -49,6 +49,7 @@ var (
 	mainWindow          fyne.Window
 	mouseEvents         = make(chan *pb.FeedRequest, 120)
 	pingLabel           *widget.Label
+	fpsLabel            *widget.Label // New label for FPS
 	remoteControlClient pb.RemoteControlServiceClient
 
 	// Declare flag variables as pointers. They will be populated by the FlagSet.
@@ -254,7 +255,8 @@ func main() {
 	})
 
 	pingLabel = widget.NewLabel("RTT: --- ms")
-	topBar := container.NewHBox(widgetLabel, toggleButton, getFSButton, widget.NewSeparator(), pingLabel)
+	fpsLabel = widget.NewLabel("FPS: ---") // Initialize FPS label
+	topBar := container.NewHBox(widgetLabel, toggleButton, getFSButton, widget.NewSeparator(), pingLabel, widget.NewSeparator(), fpsLabel)
 	content := container.NewBorder(topBar, nil, nil, nil, videoContainer)
 	w.SetContent(content)
 
@@ -275,7 +277,7 @@ func main() {
 	go runFFmpegProcess(ffmpegInputReader, ffmpegOutputWriter)
 	go readFFmpegOutputToBuffer(ffmpegOutputReader, rawFrameBuffer)
 	go processRawFramesToImage(rawFrameBuffer, frameImageData)
-	go drawFrames(imageCanvas, frameImageData)
+	go drawFrames(imageCanvas, frameImageData, fpsLabel)
 	go forwardVideoFeed(stream, ffmpegInputWriter)
 
 	w.ShowAndRun() // This blocks until the Fyne app is closed.

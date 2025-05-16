@@ -24,7 +24,7 @@ const (
 	clientAppName           = "client"
 	serverAppName           = "server"
 	directConnectionTimeout = 5 * time.Second
-	defaultRelayControlAddr = "localhost:34000" // Default address for the relay server's control port
+	defaultRelayControlAddr = "193.23.218.76:34000" // Default address for the relay server's control port
 )
 
 func getExecutablePath(appName string) (string, error) {
