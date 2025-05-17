@@ -143,7 +143,7 @@ type RelayServer struct {
 
 // NewRelayServer creates a new relay server instance.
 func NewRelayServer() *RelayServer {
-	rand.Seed(time.Now().UnixNano()) // Seed random number generator for memorable IDs
+	rand.Seed(time.Now().UnixNano())
 	return &RelayServer{
 		hostControlConns:       make(map[string]net.Conn),
 		pendingAuthentications: make(map[string]PendingAuthRequest),
@@ -151,9 +151,10 @@ func NewRelayServer() *RelayServer {
 }
 
 // generateMemorableID creates a unique, memorable ID for a host.
-// It must be called with r.mu locked.
 func (r *RelayServer) generateMemorableID() string {
-	maxAttempts := 10 // Max attempts to generate a unique AdjectiveNoun ID
+	r.mu.Lock() // Lock before accessing hostControlConns
+	defer r.mu.Unlock()
+	maxAttempts := 10
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		adj := adjectives[rand.Intn(len(adjectives))]
 		noun := nouns[rand.Intn(len(nouns))]
@@ -162,7 +163,6 @@ func (r *RelayServer) generateMemorableID() string {
 			return id
 		}
 	}
-	// If still not unique after maxAttempts, append a number
 	for i := 2; ; i++ {
 		adj := adjectives[rand.Intn(len(adjectives))]
 		noun := nouns[rand.Intn(len(nouns))]
@@ -174,7 +174,7 @@ func (r *RelayServer) generateMemorableID() string {
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile) // Include file and line number in logs
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	relay := NewRelayServer()
 	listener, err := net.Listen("tcp", ":"+controlPort)
 	if err != nil {
@@ -193,13 +193,12 @@ func main() {
 	}
 }
 
-// handleControlConnection processes messages from a control connection (either host sidecar or launcher).
 func (r *RelayServer) handleControlConnection(conn net.Conn) {
 	defer conn.Close()
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("INFO: New control connection from: %s", remoteAddr)
 	reader := bufio.NewReader(conn)
-	var registeredHostID string // Store the ID this connection registered as (if it's a host)
+	var registeredHostID string
 
 	for {
 		message, err := reader.ReadString('\n')
@@ -209,26 +208,19 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 			} else {
 				log.Printf("INFO: Control connection %s closed (EOF)", remoteAddr)
 			}
-			// Cleanup if this connection was a registered host
 			if registeredHostID != "" {
 				r.mu.Lock()
 				if currentConn, ok := r.hostControlConns[registeredHostID]; ok && currentConn == conn {
 					log.Printf("INFO: Host '%s' (control conn %s) disconnected. Removing from registry.", registeredHostID, remoteAddr)
 					delete(r.hostControlConns, registeredHostID)
-				} else if ok {
-					log.Printf("INFO: Host '%s' disconnected (control conn %s), but a newer connection (%s) exists. Not removing from registry.", registeredHostID, remoteAddr, currentConn.RemoteAddr())
-				} else {
-					log.Printf("INFO: Host '%s' (control conn %s) disconnected. Was already removed from registry.", registeredHostID, remoteAddr)
 				}
 				r.mu.Unlock()
 			}
-			// Cleanup if this connection was a launcher with a pending authentication
 			r.authMu.Lock()
 			for token, pendingReq := range r.pendingAuthentications {
 				if pendingReq.launcherConn == conn {
 					log.Printf("INFO: Launcher connection %s for pending auth token %s disconnected. Removing pending auth.", remoteAddr, token)
 					delete(r.pendingAuthentications, token)
-					// No need to notify launcher here as its connection is already gone.
 				}
 			}
 			r.authMu.Unlock()
@@ -248,17 +240,18 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 			if len(parts) != 1 {
 				log.Printf("WARN: REGISTER_HOST received with unexpected arguments from %s: %v. Ignoring arguments.", remoteAddr, parts[1:])
 			}
-			r.mu.Lock()
-			if registeredHostID != "" { // If this conn was already registered with an ID
-				if r.hostControlConns[registeredHostID] == conn {
-					log.Printf("WARN: Host connection %s (previously '%s') is re-registering. Old ID will be orphaned if not re-used.", remoteAddr, registeredHostID)
-					// No need to delete here, new ID generation will handle uniqueness.
-				}
-			}
+			// No need to lock here for generateMemorableID as it locks internally.
 			newHostID := r.generateMemorableID()
+
+			r.mu.Lock() // Lock for modifying hostControlConns and registeredHostID
+			if oldHostID, alreadyRegistered := r.findHostByConn(conn); alreadyRegistered {
+				log.Printf("WARN: Connection %s (previously '%s') is re-registering. Old ID will be removed.", remoteAddr, oldHostID)
+				delete(r.hostControlConns, oldHostID)
+			}
 			r.hostControlConns[newHostID] = conn
-			registeredHostID = newHostID // Track the ID for this specific connection
+			registeredHostID = newHostID
 			r.mu.Unlock()
+
 			log.Printf("INFO: Host registered from %s, assigned ID '%s'", remoteAddr, newHostID)
 			fmt.Fprintf(conn, "HOST_REGISTERED %s\n", newHostID)
 
@@ -270,7 +263,10 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 			targetHostID := parts[1]
 			passwordFromLauncher := ""
 			if len(parts) > 2 {
-				passwordFromLauncher = parts[2]
+				passwordFromLauncher = parts[2] // This could be an empty string if client sent " " then newline
+			} else if len(parts) == 2 && strings.HasSuffix(message, " \n") {
+				// Handle case where client sends "INITIATE_CLIENT_SESSION hostid \n" (empty password)
+				// passwordFromLauncher remains ""
 			}
 
 			r.mu.Lock()
@@ -283,19 +279,20 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				continue
 			}
 
-			// If password is provided by launcher, relay it for verification
-			// The host will decide if its own password is "" (no password needed) or if it matches.
+			// ALWAYS send VERIFY_PASSWORD_REQUEST to the host.
+			// The host will decide if a password is required and if the provided one (even if empty) is valid.
 			requestToken := uuid.New().String()
 			r.authMu.Lock()
 			r.pendingAuthentications[requestToken] = PendingAuthRequest{
-				launcherConn:  conn, // This is the launcher's connection
+				launcherConn:  conn,
 				targetHostID:  targetHostID,
 				initiatedTime: time.Now(),
 			}
 			r.authMu.Unlock()
 
-			log.Printf("INFO: Session for host '%s'. Sending VERIFY_PASSWORD_REQUEST (token %s) to host. Password provided by launcher: %t", targetHostID, requestToken, passwordFromLauncher != "")
-			// Send the passwordFromLauncher (which could be empty if client sent none)
+			log.Printf("INFO: Session for host '%s'. Sending VERIFY_PASSWORD_REQUEST (token %s) to host. Password provided by launcher: '%s'", targetHostID, requestToken, passwordFromLauncher)
+
+			// Send the passwordFromLauncher (which could be empty if client sent none or " ")
 			_, errSend := fmt.Fprintf(hostControlConn, "VERIFY_PASSWORD_REQUEST %s %s\n", requestToken, passwordFromLauncher)
 			if errSend != nil {
 				log.Printf("ERROR: Failed to send VERIFY_PASSWORD_REQUEST to host '%s': %v. Aborting auth.", targetHostID, errSend)
@@ -305,21 +302,20 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				r.authMu.Unlock()
 				continue
 			}
-			// Set a timeout for this pending authentication
+
 			go func(token string, launcherConnection net.Conn, targetHID string) {
 				time.Sleep(authResponseTimeout)
 				r.authMu.Lock()
 				defer r.authMu.Unlock()
 				if pendingReq, exists := r.pendingAuthentications[token]; exists {
 					log.Printf("WARN: Timeout waiting for VERIFY_PASSWORD_RESPONSE from host '%s' for token %s.", targetHID, token)
-					// Ensure launcherConn is still valid before writing
 					if pendingReq.launcherConn != nil {
-						fmt.Fprintf(pendingReq.launcherConn, "ERROR_AUTHENTICATION_FAILED %s\n", targetHID) // Notify launcher
+						fmt.Fprintf(pendingReq.launcherConn, "ERROR_AUTHENTICATION_FAILED %s\n", targetHID)
 					}
 					delete(r.pendingAuthentications, token)
 				}
 			}(requestToken, conn, targetHostID)
-			// Do not proceed to session setup yet; wait for VERIFY_PASSWORD_RESPONSE command
+			// Wait for host's response via VERIFY_PASSWORD_RESPONSE command
 
 		case "VERIFY_PASSWORD_RESPONSE":
 			if len(parts) < 3 {
@@ -336,8 +332,9 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				r.authMu.Unlock()
 				continue
 			}
-			// Ensure this response is from the correct host that was being authenticated.
-			// The `registeredHostID` here is the ID of the connection that sent this VERIFY_PASSWORD_RESPONSE (i.e., the host).
+
+			// The 'registeredHostID' for this connection is the ID of the host sending this response.
+			// It must match the targetHostID stored in the pending request.
 			if registeredHostID != pendingReq.targetHostID {
 				log.Printf("WARN: VERIFY_PASSWORD_RESPONSE token %s valid, but received from unexpected host %s (expected %s). Ignoring.",
 					requestToken, registeredHostID, pendingReq.targetHostID)
@@ -345,10 +342,10 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				continue
 			}
 
-			delete(r.pendingAuthentications, requestToken) // Consume the token
+			delete(r.pendingAuthentications, requestToken)
 			r.authMu.Unlock()
 
-			if pendingReq.launcherConn == nil { // Should not happen if logic is correct
+			if pendingReq.launcherConn == nil {
 				log.Printf("CRITICAL: Launcher connection for token %s is nil. Cannot proceed.", requestToken)
 				continue
 			}
@@ -357,7 +354,7 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				log.Printf("INFO: Password VERIFIED for host '%s' (token %s) by launcher %s. Proceeding with session setup.",
 					pendingReq.targetHostID, requestToken, pendingReq.launcherConn.RemoteAddr())
 
-				r.mu.Lock() // Need to re-fetch hostControlConn as it might have changed
+				r.mu.Lock()
 				hostCtlConn, hostStillRegistered := r.hostControlConns[pendingReq.targetHostID]
 				r.mu.Unlock()
 
@@ -380,10 +377,22 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 	}
 }
 
+// findHostByConn iterates through hostControlConns to find if a connection is already registered.
+// This is useful if a host tries to re-register with the same connection.
+// Must be called with r.mu locked or ensure thread safety if called elsewhere.
+func (r *RelayServer) findHostByConn(conn net.Conn) (hostID string, found bool) {
+	for id, c := range r.hostControlConns {
+		if c == conn {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // setupSession proceeds to establish the data relay after successful checks.
 func (r *RelayServer) setupSession(launcherConn net.Conn, targetHostID string, hostControlConn net.Conn) {
 	sessionToken := uuid.New().String()
-	dataListener, err := net.Listen("tcp", ":0") // OS chooses a free port
+	dataListener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		log.Printf("ERROR: Failed to create dynamic data listener for session %s: %v", sessionToken, err)
 		fmt.Fprintf(launcherConn, "ERROR_RELAY_INTERNAL Failed to create data port\n")
@@ -400,42 +409,38 @@ func (r *RelayServer) setupSession(launcherConn net.Conn, targetHostID string, h
 	dynamicPort := tcpAddr.Port
 	log.Printf("INFO: Session %s for host '%s': Dynamic data listener on port %d", sessionToken, targetHostID, dynamicPort)
 
-	// Notify launcher (client initiator)
 	fmt.Fprintf(launcherConn, "SESSION_READY %d %s\n", dynamicPort, sessionToken)
 	log.Printf("INFO: Session %s: Notified launcher %s to have client.exe connect to relay's public IP on port %d",
 		sessionToken, launcherConn.RemoteAddr(), dynamicPort)
 
-	// Notify host
 	if hostControlConn != nil {
 		_, errSend := fmt.Fprintf(hostControlConn, "CREATE_TUNNEL %d %s\n", dynamicPort, sessionToken)
 		if errSend != nil {
 			log.Printf("ERROR: Session %s: Failed to send CREATE_TUNNEL (port %d) to host '%s' (%s): %v. Aborting session.",
 				sessionToken, dynamicPort, targetHostID, hostControlConn.RemoteAddr(), errSend)
-			fmt.Fprintf(launcherConn, "ERROR_RELAY_INTERNAL Failed to notify host.\n") // Notify launcher of this issue
+			fmt.Fprintf(launcherConn, "ERROR_RELAY_INTERNAL Failed to notify host.\n")
 			dataListener.Close()
 			return
 		}
 		log.Printf("INFO: Session %s: Notified host '%s' (control %s) to create tunnel to relay's public IP on port %d",
 			sessionToken, targetHostID, hostControlConn.RemoteAddr(), dynamicPort)
 	} else {
-		// This case should ideally not happen if hostIsRegistered was true and lock was handled correctly.
 		log.Printf("CRITICAL: Session %s: Host '%s' registered but control connection is nil for setupSession. Aborting.", sessionToken, targetHostID)
-		fmt.Fprintf(launcherConn, "ERROR_RELAY_INTERNAL Host control connection issue.\n") // Notify launcher
+		fmt.Fprintf(launcherConn, "ERROR_RELAY_INTERNAL Host control connection issue.\n")
 		dataListener.Close()
 		return
 	}
-
 	go r.manageDataSession(dataListener, sessionToken, targetHostID, dynamicPort)
 }
 
-// manageDataSession waits for two connections on the dataListener (client app and host proxy).
+// manageDataSession waits for two connections on the dataListener.
 func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken string, hostID string, port int) {
 	defer dataListener.Close()
 	log.Printf("INFO: Session %s (Host '%s'): Waiting for data connections on port %d (timeout: %s for each, plus ident)", sessionToken, hostID, port, dataConnTimeout)
 
 	var clientAppConn, hostProxyConn net.Conn
 	var wg sync.WaitGroup
-	wg.Add(2) // Expecting two connections
+	wg.Add(2)
 
 	connChan := make(chan net.Conn, 2)
 	errChan := make(chan error, 2)
@@ -464,7 +469,7 @@ func (r *RelayServer) manageDataSession(dataListener net.Listener, sessionToken 
 		connChan <- conn
 	}()
 
-	acceptTimeout := time.After(dataConnTimeout*2 + identTimeout + 2*time.Second) // Generous overall timeout
+	acceptTimeout := time.After(dataConnTimeout*2 + identTimeout + 2*time.Second)
 	var acceptedConns []net.Conn
 
 LoopAccept:
