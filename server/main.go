@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	pb "control_grpc/gen/proto"
+	pb "control_grpc/gen/proto" // Your generated protobuf package
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -43,9 +43,10 @@ type server struct {
 	pb.UnimplementedAuthServiceServer
 	pb.UnimplementedRemoteControlServiceServer
 	pb.UnimplementedFileTransferServiceServer
-	localGrpcAddr       string
-	sessionPasswordHash string // Store the HASHED session password
-	currentRelayHostID  string
+	pb.UnimplementedTerminalServiceServer // <--- CHANGE #1: ADD THIS LINE
+	localGrpcAddr                         string
+	sessionPasswordHash                   string // Store the HASHED session password
+	currentRelayHostID                    string
 }
 
 var (
@@ -117,6 +118,7 @@ func main() {
 	pb.RegisterAuthServiceServer(grpcServer, s)
 	pb.RegisterRemoteControlServiceServer(grpcServer, s)
 	pb.RegisterFileTransferServiceServer(grpcServer, s)
+	pb.RegisterTerminalServiceServer(grpcServer, s) // <--- CHANGE #2: ADD THIS LINE
 	reflection.Register(grpcServer)
 
 	fyneApp = app.New()
@@ -363,7 +365,6 @@ func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localIniti
 }
 
 func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost, sessionToken, registeredHostID string) {
-	// ... (This function remains the same as before)
 	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Attempting to connect to relay data endpoint %s", sessionToken, registeredHostID, relayDataAddrForHost)
 	hostProxyConn, err := net.DialTimeout("tcp", relayDataAddrForHost, 10*time.Second)
 	if err != nil {
@@ -439,7 +440,6 @@ func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost
 }
 
 func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
-	// ... (This function remains the same as before)
 	serverCert, err := tls.X509KeyPair(serverCertEmbed, serverKeyEmbed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server key pair: %w", err)
@@ -453,23 +453,21 @@ func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    clientCertPool,
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   "localhost",
+		ServerName:   "localhost", // This should match the CN or SAN in server.crt
 	}
 	return credentials.NewTLS(config), nil
 }
 
 func (s *server) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
-	// ... (This function remains the same as before)
 	return &pb.PingResponse{ClientTimestampNano: req.GetClientTimestampNano()}, nil
 }
 
+// isValidUser is a placeholder, replace with actual authentication logic if needed.
 func (s *server) isValidUser(username, password string) bool {
-	// ... (This function remains the same as before)
 	return username == "test" && password == "password"
 }
 
 func isNetworkCloseError(err error) bool {
-	// ... (This function remains the same as before)
 	if err == nil {
 		return false
 	}
