@@ -1,20 +1,20 @@
 package main
 
 import (
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"io"
 	"log"
+	"strings" // For key name mapping
 	"time"
 
 	"github.com/go-vgo/robotgo" // For controlling mouse/keyboard and getting screen size
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "control_grpc/gen/proto"  // Assuming this path is correct
 	"control_grpc/server/screen" // Assuming this is your local package for screen capture
 )
 
 // GetFeed handles the bidirectional stream for remote control.
-// It receives mouse/keyboard events from the client and sends screen frames to the client.
 func (s *server) GetFeed(stream pb.RemoteControlService_GetFeedServer) error {
 	serverWidth, serverHeight := robotgo.GetScreenSize()
 	log.Printf("Server screen dimensions: %dx%d", serverWidth, serverHeight)
@@ -26,7 +26,6 @@ func (s *server) GetFeed(stream pb.RemoteControlService_GetFeedServer) error {
 	}
 	defer capture.Close()
 
-	// Receive initial message from client (e.g., client dimensions)
 	reqMsgInit, err := stream.Recv()
 	if err != nil {
 		if err == io.EOF {
@@ -41,88 +40,236 @@ func (s *server) GetFeed(stream pb.RemoteControlService_GetFeedServer) error {
 	scaleX, scaleY := getScaleFactors(serverWidth, serverHeight, reqMsgInit)
 	log.Printf("Calculated scale factors: ScaleX=%.2f, ScaleY=%.2f", scaleX, scaleY)
 
-	// Channel for mouse events received from the client
-	mouseEvents := make(chan *pb.FeedRequest, 120) // Buffered channel
+	inputEvents := make(chan *pb.FeedRequest, 120)
 
-	// Goroutine to process mouse events from the channel
-	go handleMouseEvents(mouseEvents, scaleX, scaleY)
+	go handleInputEvents(inputEvents, scaleX, scaleY)
+	go receiveInputEvents(stream, inputEvents)
 
-	// Goroutine to receive mouse events from the stream and put them into the channel
-	go receiveMouseEvents(stream, mouseEvents)
-
-	// Send screen feed in the current goroutine
 	return sendScreenFeed(stream, capture)
 }
 
-// getScaleFactors calculates the scaling factors based on server and client screen dimensions.
+// getScaleFactors calculates the scaling factors.
 func getScaleFactors(serverWidth, serverHeight int, reqMsgInit *pb.FeedRequest) (float32, float32) {
 	if reqMsgInit.GetClientWidth() == 0 || reqMsgInit.GetClientHeight() == 0 {
 		log.Println("Client width or height is zero, using 1.0 for scale factors.")
-		return 1.0, 1.0 // Avoid division by zero, default to no scaling
+		return 1.0, 1.0
 	}
 	scaleX := float32(serverWidth) / float32(reqMsgInit.GetClientWidth())
 	scaleY := float32(serverHeight) / float32(reqMsgInit.GetClientHeight())
 	return scaleX, scaleY
 }
 
-// handleMouseEvents processes mouse events received from the client.
-func handleMouseEvents(mouseEvents chan *pb.FeedRequest, scaleX, scaleY float32) {
-	log.Println("Mouse event handler goroutine started.")
-	defer log.Println("Mouse event handler goroutine stopped.")
-	for reqMsg := range mouseEvents {
-		// Scale client coordinates to server coordinates
-		serverX := int(float32(reqMsg.GetMouseX()) * scaleX)
-		serverY := int(float32(reqMsg.GetMouseY()) * scaleY)
-
-		// log.Printf("Client Event: Type=%s, Btn=%s, ClientX=%d, ClientY=%d -> ServerX=%d, ServerY=%d",
-		// 	reqMsg.GetMouseEventType(), reqMsg.GetMouseBtn(), reqMsg.GetMouseX(), reqMsg.GetMouseY(), serverX, serverY) // Verbose
-
-		robotgo.Move(serverX, serverY)
-
-		eventType := reqMsg.GetMouseEventType()
-		mouseBtn := reqMsg.GetMouseBtn() // "left", "right", "middle"
-
-		if eventType == "down" || eventType == "press" { // "press" for compatibility with some clients
-			// log.Printf("Mouse Down: %s at %d,%d", mouseBtn, serverX, serverY) // Verbose
-			robotgo.MouseDown(mouseBtn)
-		} else if eventType == "up" || eventType == "release" { // "release" for compatibility
-			// log.Printf("Mouse Up: %s at %d,%d", mouseBtn, serverX, serverY) // Verbose
-			robotgo.MouseUp(mouseBtn)
+// mapFyneKeyToRobotGo converts Fyne key names to robotgo compatible key names.
+func mapFyneKeyToRobotGo(fyneKeyName string) (key string, isSpecial bool) {
+	switch fyneKeyName {
+	case "Return", "Enter":
+		return "enter", true
+	case "Space":
+		return "space", true
+	case "Backspace":
+		return "backspace", true
+	case "Delete":
+		return "delete", true
+	case "Tab":
+		return "tab", true
+	case "Escape":
+		return "escape", true
+	case "Up":
+		return "up", true
+	case "Down":
+		return "down", true
+	case "Left":
+		return "left", true
+	case "Right":
+		return "right", true
+	case "Home":
+		return "home", true
+	case "End":
+		return "end", true
+	case "PageUp":
+		return "pageup", true
+	case "PageDown":
+		return "pagedown", true
+	case "ShiftL", "ShiftR":
+		return "shift", true
+	case "ControlL", "ControlR":
+		return "ctrl", true
+	case "AltL", "AltR", "Menu": // Menu is often Alt
+		return "alt", true
+	case "SuperL", "SuperR", "MetaL", "MetaR":
+		return "cmd", true // robotgo uses "cmd" for Super/Win/Command
+	case "F1":
+		return "f1", true
+	case "F2":
+		return "f2", true
+	case "F3":
+		return "f3", true
+	case "F4":
+		return "f4", true
+	case "F5":
+		return "f5", true
+	case "F6":
+		return "f6", true
+	case "F7":
+		return "f7", true
+	case "F8":
+		return "f8", true
+	case "F9":
+		return "f9", true
+	case "F10":
+		return "f10", true
+	case "F11":
+		return "f11", true
+	case "F12":
+		return "f12", true
+	case "Num0", "Num1", "Num2", "Num3", "Num4", "Num5", "Num6", "Num7", "Num8", "Num9":
+		return strings.ToLower(strings.TrimPrefix(fyneKeyName, "Num")), true
+	case "NumLock":
+		return "numlock", true
+	case "NumEnter":
+		return "enter", true
+	case "NumAdd", "NumpadAdd":
+		return "+", true
+	case "NumSubtract", "NumpadSubtract":
+		return "-", true
+	case "NumMultiply", "NumpadMultiply":
+		return "*", true
+	case "NumDivide", "NumpadDivide":
+		return "/", true
+	case "NumDecimal", "NumpadDecimal":
+		return ".", true
+	default:
+		if strings.HasPrefix(fyneKeyName, "Key") && len(fyneKeyName) == 4 {
+			char := fyneKeyName[3:]
+			if len(char) == 1 && ((char[0] >= 'A' && char[0] <= 'Z') || (char[0] >= '0' && char[0] <= '9')) {
+				return strings.ToLower(char), false
+			}
 		}
-		// "click" can be a sequence of down and up.
-		// "drag" is typically a move event while a button is held down. robotgo.Move handles this.
+		if len(fyneKeyName) == 1 {
+			return strings.ToLower(fyneKeyName), false
+		}
+		log.Printf("Unhandled Fyne key name for mapping: '%s'", fyneKeyName)
+		return strings.ToLower(fyneKeyName), false
 	}
 }
 
-// receiveMouseEvents continuously receives mouse event messages from the gRPC stream.
-func receiveMouseEvents(stream pb.RemoteControlService_GetFeedServer, mouseEvents chan *pb.FeedRequest) {
-	log.Println("Mouse event receiver goroutine started.")
-	defer log.Println("Mouse event receiver goroutine stopped.")
-	defer close(mouseEvents) // Close the channel when this goroutine exits
+// handleInputEvents processes mouse and keyboard events.
+func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32) {
+	log.Println("Input event handler goroutine started.")
+	defer log.Println("Input event handler goroutine stopped.")
+
+	for reqMsg := range inputEvents {
+		switch reqMsg.Message {
+		case "mouse_event":
+			serverX := int(float32(reqMsg.GetMouseX()) * scaleX)
+			serverY := int(float32(reqMsg.GetMouseY()) * scaleY)
+			robotgo.Move(serverX, serverY)
+			eventType := reqMsg.GetMouseEventType()
+			mouseBtn := reqMsg.GetMouseBtn()
+
+			if eventType == "down" {
+				robotgo.MouseDown(mouseBtn)
+			} else if eventType == "up" {
+				robotgo.MouseUp(mouseBtn)
+			}
+
+		case "keyboard_event":
+			kbEventType := reqMsg.GetKeyboardEventType()
+			fyneKeyName := reqMsg.GetKeyName()
+			keyChar := reqMsg.GetKeyCharStr()
+
+			// Prepare modifiers for robotgo
+			var robotgoModifiers []string
+			if reqMsg.GetModifierShift() {
+				robotgoModifiers = append(robotgoModifiers, "shift")
+			}
+			if reqMsg.GetModifierCtrl() {
+				robotgoModifiers = append(robotgoModifiers, "ctrl")
+			}
+			if reqMsg.GetModifierAlt() {
+				robotgoModifiers = append(robotgoModifiers, "alt")
+			}
+			if reqMsg.GetModifierSuper() {
+				if fyneKeyName != "Delete" && fyneKeyName != "Backspace" {
+					robotgoModifiers = append(robotgoModifiers, "cmd")
+				}
+			}
+
+			robotgoKeyName, _ := mapFyneKeyToRobotGo(fyneKeyName)
+
+			// log.Printf("Server: Keyboard Event: Type=%s, KeyName=%s (robotgo: %s), Char=%s, Modifiers: %+v",
+			// 	kbEventType, fyneKeyName, robotgoKeyName, keyChar, robotgoModifiers) // Debug
+
+			switch kbEventType {
+			case "keydown":
+				// Special handling for Ctrl+Alt+Del
+				if robotgoKeyName == "delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() {
+					log.Println("Server: Attempting to simulate Ctrl+Alt+Delete")
+					robotgo.Toggle("ctrl", "down")
+					robotgo.Toggle("alt", "down")
+					robotgo.KeyTap("delete")
+					robotgo.Toggle("alt", "up")
+					robotgo.Toggle("ctrl", "up")
+				} else if robotgoKeyName != "" {
+					if len(robotgoModifiers) > 0 {
+						// Convert string modifiers to []interface{} for KeyTap's variadic argument
+						modsForTap := make([]interface{}, len(robotgoModifiers))
+						for i, m := range robotgoModifiers {
+							modsForTap[i] = m
+						}
+						robotgo.KeyTap(robotgoKeyName, modsForTap...)
+						// log.Printf("Server: robotgo.KeyTap(%s, %v)", robotgoKeyName, modsForTap) // Debug
+					} else {
+						robotgo.KeyTap(robotgoKeyName) // Simple key tap without modifiers
+						// log.Printf("Server: robotgo.KeyTap(%s)", robotgoKeyName) // Debug
+					}
+				} else if keyChar != "" && len(robotgoModifiers) > 0 {
+					log.Printf("Server: Received keychar '%s' with modifiers but no specific robotgoKeyName. Typing char directly.", keyChar)
+					robotgo.TypeStr(keyChar) // TypeStr might not respect external modifier toggles in the same way as KeyTap.
+					// For complex modified character input, OS-level IME interaction is usually better.
+				}
+
+			case "keychar":
+				if len(keyChar) > 0 {
+					robotgo.TypeStr(keyChar)
+					// log.Printf("Server: robotgo.TypeStr(%s)", keyChar) // Debug
+				}
+			default:
+				log.Printf("Unknown keyboard event type: %s", kbEventType)
+			}
+		default:
+			log.Printf("Unknown input event message type: %s", reqMsg.Message)
+		}
+	}
+}
+
+// receiveInputEvents continuously receives messages from the gRPC stream.
+func receiveInputEvents(stream pb.RemoteControlService_GetFeedServer, inputEvents chan *pb.FeedRequest) {
+	log.Println("Input event receiver goroutine started.")
+	defer log.Println("Input event receiver goroutine stopped.")
+	defer close(inputEvents)
 
 	for {
 		reqMsg, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
-				log.Println("Client closed the stream (EOF in receiveMouseEvents).")
-				return // Client closed the stream
-			}
-			// Check for context cancellation (client disconnected)
-			s, ok := status.FromError(err)
-			if ok && (s.Code() == codes.Canceled || s.Code() == codes.Unavailable) {
-				log.Printf("Stream canceled or unavailable in receiveMouseEvents: %v", err)
+				log.Println("Client closed the stream (EOF in receiveInputEvents).")
 				return
 			}
-			log.Printf("Error receiving mouse event from stream: %v", err)
-			return // Other critical error
+			s, ok := status.FromError(err)
+			if ok && (s.Code() == codes.Canceled || s.Code() == codes.Unavailable) {
+				log.Printf("Stream canceled or unavailable in receiveInputEvents: %v", err)
+				return
+			}
+			log.Printf("Error receiving input event from stream: %v", err)
+			return
 		}
 
-		// Send received message to the mouseEvents channel for processing
 		select {
-		case mouseEvents <- reqMsg:
+		case inputEvents <- reqMsg:
 			// Event successfully queued
 		default:
-			log.Println("Mouse event channel full, dropping event. This might indicate slow processing.")
+			log.Println("Input event channel full, dropping event.")
 		}
 	}
 }
@@ -132,9 +279,8 @@ func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *scree
 	log.Println("Screen feed sender goroutine started.")
 	defer log.Println("Screen feed sender goroutine stopped.")
 
-	// Buffer for frame data. Size might need adjustment based on typical frame sizes.
-	frameBuffer := make([]byte, 2*1024*1024)   // 2MB buffer, adjust as needed
-	ticker := time.NewTicker(time.Second / 30) // Target ~30 FPS
+	frameBuffer := make([]byte, 2*1024*1024)
+	ticker := time.NewTicker(time.Second / 30)
 	defer ticker.Stop()
 
 	var frameCounter int32 = 0
@@ -143,44 +289,37 @@ func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *scree
 		case <-ticker.C:
 			n, err := capture.ReadFrame(frameBuffer)
 			if err != nil {
-				if err == io.EOF { // Should not happen with continuous capture
+				if err == io.EOF {
 					log.Println("Screen capture source reported EOF.")
 					return status.Errorf(codes.Internal, "Screen capture source EOF")
 				}
 				log.Printf("Error reading frame from screen capture: %v", err)
-				// Decide if this error is fatal for the stream
-				// For now, we continue, but some errors might require stopping.
 				continue
 			}
-
 			if n == 0 {
-				// log.Println("Read 0 bytes from screen capture, skipping frame.") // Can be spammy
 				continue
 			}
-
-			// log.Printf("Sending frame %d, size %d bytes, HwAccel: %s", frameCounter, n, screen.Accel) // Verbose
 
 			err = stream.Send(&pb.FeedResponse{
 				Data:        frameBuffer[:n],
 				FrameNumber: frameCounter,
 				Timestamp:   time.Now().UnixNano(),
-				ContentType: "video/mp2t", // MPEG Transport Stream
-				HwAccel:     screen.Accel, // Hardware acceleration info from screen package
+				ContentType: "video/mp2t",
+				HwAccel:     screen.Accel,
 			})
 			if err != nil {
-				// Check for client disconnection or stream errors
 				s, ok := status.FromError(err)
 				if ok && (s.Code() == codes.Canceled || s.Code() == codes.Unavailable) {
-					log.Printf("Client disconnected or stream unavailable: %v", err)
-					return nil // Graceful exit if client disconnected
+					log.Printf("Client disconnected or stream unavailable during send: %v", err)
+					return nil
 				}
 				log.Printf("Error sending frame to client: %v", err)
-				return status.Errorf(codes.Internal, "Failed to send frame: %v", err) // Propagate other errors
+				return status.Errorf(codes.Internal, "Failed to send frame: %v", err)
 			}
 			frameCounter++
 		case <-stream.Context().Done():
 			log.Printf("Stream context done (client likely disconnected): %v", stream.Context().Err())
-			return nil // Graceful exit
+			return nil
 		}
 	}
 }

@@ -11,14 +11,27 @@ service RemoteControlService {
 
 message FeedRequest {
   bool success = 1;
-  string message = 2;
-  int32 clientWidth = 3;
-  int32 clientHeight = 4;
+  string message = 2;       // General message type, e.g., "init", "mouse_event", "keyboard_event"
+  int32 clientWidth = 3;    // Client's viewport width
+  int32 clientHeight = 4;   // Client's viewport height
+  int64 timestamp = 9;      // Event timestamp
+
+  // Mouse specific fields
   int32 mouseX = 5;
   int32 mouseY = 6;
-  string mouseBtn = 7;
-  string mouseEventType = 8;
-  int64 timestamp = 9;
+  string mouseBtn = 7;        // e.g., "left", "right", "middle" (for current state or event button)
+  string mouseEventType = 8;  // e.g., "down", "up", "move", "in", "out"
+
+  // Keyboard specific fields
+  string keyboard_event_type = 10; // "keydown", "keyup", "keychar"
+  string key_name = 11;            // For keydown/keyup (e.g., "KeyA", "Enter", "ShiftL") from fyne.KeyEvent.Name
+  string key_char_str = 12;        // For keychar (string representation of the rune typed)
+
+  // Modifier key states
+  bool modifier_shift = 13;
+  bool modifier_ctrl = 14;
+  bool modifier_alt = 15;
+  bool modifier_super = 16;      // Super key (Windows key, Command key on macOS)
 }
 
 

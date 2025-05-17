@@ -7,7 +7,6 @@ import (
 	_ "embed"
 	"flag" // Standard library flag package
 	"fmt"
-	"fyne.io/fyne/v2/dialog"
 	"image"
 	"io"
 	"log"
@@ -22,6 +21,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -46,20 +46,18 @@ var (
 	childrenMap         = make(map[string][]string)
 	filesClient         pb.FileTransferServiceClient
 	refreshTreeChan     = make(chan string, 1)
-	mainWindow          fyne.Window
-	mouseEvents         = make(chan *pb.FeedRequest, 120)
+	mainWindow          fyne.Window                       // This is the main application window
+	inputEvents         = make(chan *pb.FeedRequest, 120) // Handles mouse & keyboard
 	pingLabel           *widget.Label
-	fpsLabel            *widget.Label // New label for FPS
+	fpsLabel            *widget.Label
 	remoteControlClient pb.RemoteControlServiceClient
 
-	// Declare flag variables as pointers. They will be populated by the FlagSet.
-	serverAddrActual *string // Renamed to avoid conflict if a package also defines 'serverAddr'
+	serverAddrActual *string
 	connectionType   *string
 	sessionToken     *string
 )
 
 // customRelayDialer is used by gRPC when connecting via relay.
-// It establishes a raw TCP connection, sends the session token, then hands the connection to gRPC.
 func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Conn, error) {
 	log.Printf("INFO: [Relay Dialer] Attempting to dial relay data address: %s", targetRelayDataAddr)
 	dialer := &net.Dialer{}
@@ -87,24 +85,42 @@ func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Con
 	return conn, nil
 }
 
+// sendKeyboardEvent constructs and queues a keyboard event.
+func sendKeyboardEvent(eventType, keyName, keyChar string) {
+	req := &pb.FeedRequest{
+		Message:           "keyboard_event", // Differentiate from mouse_event
+		KeyboardEventType: eventType,
+		KeyName:           keyName,
+		KeyCharStr:        keyChar,
+		Timestamp:         time.Now().UnixNano(),
+		ClientWidth:       1920, // Or actual dynamic client width if needed
+		ClientHeight:      1080, // Or actual dynamic client height
+	}
+
+	select {
+	case inputEvents <- req:
+		// log.Printf("Keyboard event queued: Type: %s, Name: %s, Char: %s", eventType, keyName, keyChar) // Verbose
+	default:
+		log.Println("Keyboard event dropped (inputEvents channel full)")
+	}
+}
+
 func main() {
 	clientFlags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
 	serverAddrActual = clientFlags.String("address", "localhost:32212", "The server address (direct) or relay data address (relay)")
 	connectionType = clientFlags.String("connectionType", "direct", "Connection type: 'direct' or 'relay'")
 	sessionToken = clientFlags.String("sessionToken", "", "Session token for relay connection")
 
 	err := clientFlags.Parse(os.Args[1:])
 	if err != nil {
-		log.Printf("FATAL: Error parsing flags: %v", err)
-		os.Exit(1) // Exit gracefully after logging
+		log.Fatalf("FATAL: Error parsing flags: %v", err)
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	a := app.New()
 	w := a.NewWindow("Control GRPC client")
-	mainWindow = w
+	mainWindow = w // Assign the created window to the global mainWindow variable
 
 	normalSize := fyne.NewSize(1280, 720)
 	fullSize := fyne.NewSize(1920, 1080)
@@ -112,33 +128,22 @@ func main() {
 	imageCanvas.SetMinSize(normalSize)
 	imageCanvas.FillMode = canvas.ImageFillStretch
 
-	// Pass the actual server address (from flags) to loadTLSCredentialsFromEmbed
-	// so it can be used for ServerName in TLS config.
 	tlsCreds, err := loadTLSCredentialsFromEmbed(*serverAddrActual)
 	if err != nil {
-		// This is a critical setup error, Fatel is appropriate.
 		log.Fatalf("FATAL: Cannot load TLS credentials: %v", err)
 	}
 
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(tlsCreds),
-		// grpc.WithBlock(), // WithBlock can be useful but also makes DialContext hang until timeout.
-		// Context-based timeout in DialContext is generally preferred.
 	}
 
 	log.Printf("INFO: Client attempting to connect. Type: '%s', Address: '%s'", *connectionType, *serverAddrActual)
 
 	if *connectionType == "relay" {
 		if *sessionToken == "" {
-			log.Printf("FATAL: Relay connection type specified but no session token provided.")
-			os.Exit(1)
+			log.Fatalf("FATAL: Relay connection type specified but no session token provided.")
 		}
 		log.Printf("INFO: Using custom dialer for relay connection to %s with session token %s", *serverAddrActual, *sessionToken)
-		// For relay, the ServerName in TLS should ideally be the original target host's ID/name,
-		// not the relay's IP. This requires passing more info to client.exe.
-		// The current loadTLSCredentialsFromEmbed uses serverAddrActual, which for relay, is the relay's data port.
-		// This might lead to TLS errors if the relay isn't the one terminating TLS with the correct cert.
-		// Assuming end-to-end TLS for now, where server's cert must match what client expects for original target.
 		opts = append(opts, grpc.WithContextDialer(customRelayDialer))
 	}
 
@@ -148,16 +153,14 @@ func main() {
 	conn, err := grpc.DialContext(dialCtx, *serverAddrActual, opts...)
 	if err != nil {
 		log.Printf("ERROR: Could not connect to %s: %v", *serverAddrActual, err)
-		// Optionally, show a Fyne dialog here if 'a' (fyne.App) is accessible
-		// and then exit. For now, just log and exit.
-		if mainWindow != nil {
-			dialog.ShowError(fmt.Errorf("Could not connect to server: %v", err), mainWindow)
-			// Give a moment for dialog to show before exiting if app isn't running yet.
-			// However, if main exits, Fyne app might close too fast.
-			// A more robust solution involves running Fyne and gRPC connection in a way
-			// that UI can be updated before exiting.
+		if a.Driver() != nil && mainWindow != nil {
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				dialog.ShowError(fmt.Errorf("Could not connect to server: %v", err), mainWindow)
+			}()
+			time.Sleep(2 * time.Second)
 		}
-		os.Exit(1) // Exit gracefully after logging
+		os.Exit(1)
 	}
 	defer conn.Close()
 	log.Printf("INFO: Successfully connected to server/relay at %s", *serverAddrActual)
@@ -166,8 +169,7 @@ func main() {
 	filesClient = pb.NewFileTransferServiceClient(conn)
 
 	if filesClient == nil {
-		log.Printf("ERROR: Failed to create filesClient!")
-		os.Exit(1)
+		log.Fatalf("ERROR: Failed to create filesClient!")
 	}
 
 	streamCtx, streamCancel := context.WithCancel(context.Background())
@@ -176,10 +178,8 @@ func main() {
 	stream, err := remoteControlClient.GetFeed(streamCtx)
 	if err != nil {
 		log.Printf("ERROR: Error creating stream: %v", err)
-		if mainWindow != nil {
-			dialog.ShowError(fmt.Errorf("Error creating stream: %v", err), mainWindow)
-		}
-		os.Exit(1) // Exit gracefully
+		dialog.ShowError(fmt.Errorf("Error creating stream: %v", err), mainWindow)
+		os.Exit(1)
 	}
 
 	initRequest := &pb.FeedRequest{
@@ -192,23 +192,37 @@ func main() {
 	}
 	if err := stream.Send(initRequest); err != nil {
 		log.Printf("ERROR: Error sending initialization message: %v", err)
-		if mainWindow != nil {
-			dialog.ShowError(fmt.Errorf("Error sending init message: %v", err), mainWindow)
-		}
-		os.Exit(1) // Exit gracefully
+		dialog.ShowError(fmt.Errorf("Error sending init message: %v", err), mainWindow)
+		os.Exit(1)
 	}
 
-	overlay := newMouseOverlay(stream)
+	overlay := newMouseOverlay(inputEvents, mainWindow)
 	videoContainer := container.NewStack(imageCanvas, overlay)
 
 	go func() {
-		for req := range mouseEvents {
+		for req := range inputEvents {
 			if err := stream.Send(req); err != nil {
-				log.Printf("ERROR: Error sending mouse event: %v", err)
-				// If stream is broken, consider cancelling streamCtx or exiting
+				log.Printf("ERROR: Error sending input event (type: %s): %v", req.Message, err)
 			}
 		}
+		log.Println("Input event sender goroutine stopped.")
 	}()
+
+	// Setup keyboard event handlers on the main window's canvas.
+	if mainWindow != nil && mainWindow.Canvas() != nil {
+		mainWindow.Canvas().SetOnTypedRune(func(r rune) {
+			// log.Printf("Canvas TypedRune: %c", r) // Debug
+			sendKeyboardEvent("keychar", "", string(r))
+		})
+		mainWindow.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+			// log.Printf("Canvas TypedKey: Name=%s", ev.Name) // Debug
+			// SetOnTypedKey is typically for a key press (down event).
+			// We don't get a distinct "up" event from this handler.
+			sendKeyboardEvent("keydown", string(ev.Name), "")
+		})
+	} else {
+		log.Println("Error: mainWindow or its canvas is nil, cannot set keyboard handlers.")
+	}
 
 	widgetLabel := widget.NewLabel("Video Feed:")
 	toggleButtonText := binding.NewString()
@@ -227,6 +241,9 @@ func main() {
 			toggleButtonText.Set("Full screen")
 		}
 		w.Content().Refresh()
+		if overlay != nil {
+			w.Canvas().Focus(overlay)
+		}
 	})
 	toggleButtonText.AddListener(binding.NewDataListener(func() {
 		text, _ := toggleButtonText.Get()
@@ -255,7 +272,7 @@ func main() {
 	})
 
 	pingLabel = widget.NewLabel("RTT: --- ms")
-	fpsLabel = widget.NewLabel("FPS: ---") // Initialize FPS label
+	fpsLabel = widget.NewLabel("FPS: ---")
 	topBar := container.NewHBox(widgetLabel, toggleButton, getFSButton, widget.NewSeparator(), pingLabel, widget.NewSeparator(), fpsLabel)
 	content := container.NewBorder(topBar, nil, nil, nil, videoContainer)
 	w.SetContent(content)
@@ -280,13 +297,18 @@ func main() {
 	go drawFrames(imageCanvas, frameImageData, fpsLabel)
 	go forwardVideoFeed(stream, ffmpegInputWriter)
 
-	w.ShowAndRun() // This blocks until the Fyne app is closed.
-	// Code after ShowAndRun() will execute when the window is closed.
+	if overlay != nil {
+		// Request focus on the overlay so it can handle mouse events
+		// and also ensure the canvas it sits on is active for keyboard events.
+		w.Canvas().Focus(overlay)
+	}
+
+	w.ShowAndRun()
 	log.Println("INFO: Fyne app exited. Client shutting down.")
+	streamCancel()
+	close(inputEvents)
 }
 
-// loadTLSCredentialsFromEmbed loads TLS credentials for the gRPC client from embedded data.
-// It now takes the serverAddrString to help determine the ServerName for TLS.
 func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.TransportCredentials, error) {
 	clientCert, err := tls.X509KeyPair(clientCertEmbed, clientKeyEmbed)
 	if err != nil {
@@ -297,27 +319,15 @@ func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.Transport
 		return nil, fmt.Errorf("failed to append server CA cert: %w", err)
 	}
 
-	// Determine ServerName for TLS verification.
-	// This should match the CN or a SAN in the server's certificate.
 	var tlsServerName string
 	if *connectionType == "relay" {
-		// IMPORTANT: For relay, ServerName should ideally be the *original target host's ID/name*
-		// that the server's certificate is issued for, NOT the relay's IP/address.
-		// This requires the client to know the original target ID.
-		// For now, if we don't have that original ID easily available here,
-		// using the relay's address might work only if the relay itself terminates TLS
-		// with a cert valid for its address, which is not the current model.
-		// A placeholder or a configurable value might be needed.
-		// Using "localhost" as a fallback, but this is likely incorrect for real relay scenarios
-		// unless the final server's cert is for "localhost" and it's being tested locally through relay.
-		log.Printf("WARN: [TLS] In relay mode, ServerName for TLS is critical. Using 'localhost' as a placeholder. This might need adjustment for production relay setups to use the actual target server's hostname/ID.")
-		tlsServerName = "localhost" // This is a placeholder and likely needs to be the actual target HostID/name
+		log.Printf("WARN: [TLS] In relay mode, ServerName for TLS is critical. Using 'localhost' as a placeholder. This must match the server's certificate subject/SAN for the original host, not the relay.")
+		tlsServerName = "localhost"
 	} else {
-		// For direct connections, use the host part of the server address.
 		host, _, err := net.SplitHostPort(serverAddrString)
 		if err != nil {
 			log.Printf("WARN: [TLS] Could not parse host from server address '%s' for direct connection: %v. Defaulting ServerName to '%s'.", serverAddrString, err, serverAddrString)
-			tlsServerName = serverAddrString // Fallback to full address if SplitHostPort fails (e.g. not host:port)
+			tlsServerName = serverAddrString
 		} else {
 			tlsServerName = host
 		}
@@ -357,23 +367,20 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 				if pingLabel != nil {
 					pingLabel.SetText("RTT: Error")
 				}
-				if s, ok := status.FromError(err); ok {
-					if s.Code() == codes.Unavailable || s.Code() == codes.Canceled {
-						log.Println("Pinger: Connection unavailable, stopping.")
-						if pingLabel != nil {
-							pingLabel.SetText("RTT: N/A (Disconnected)")
-						}
-						return
+				s, ok := status.FromError(err)
+				if ok && (s.Code() == codes.Unavailable || s.Code() == codes.Canceled) {
+					log.Println("Pinger: Connection unavailable, stopping pinger.")
+					if pingLabel != nil {
+						pingLabel.SetText("RTT: N/A (Disconnected)")
 					}
+					return
 				}
 				continue
 			}
-			// Ensure resp is not nil before accessing its fields, though Ping should always return a non-nil response on success.
 			if resp == nil {
 				log.Printf("WARN: Ping response is nil, client timestamp: %d", req.GetClientTimestampNano())
 				continue
 			}
-			// Example of using the response, though not strictly necessary for RTT calculation here.
 			_ = resp.GetClientTimestampNano()
 
 			rttMillis := float64(time.Since(startTime).Nanoseconds()) / 1_000_000.0
@@ -381,7 +388,7 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 				pingLabel.SetText(fmt.Sprintf("RTT: %.2f ms", rttMillis))
 			}
 		case <-ctx.Done():
-			log.Println("Pinger: Context cancelled, stopping.")
+			log.Println("Pinger: Main context cancelled, stopping pinger.")
 			if pingLabel != nil {
 				pingLabel.SetText("RTT: N/A")
 			}
