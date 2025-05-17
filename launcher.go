@@ -25,8 +25,11 @@ const (
 	serverAppName           = "server"
 	directConnectionTimeout = 5 * time.Second
 	defaultRelayControlAddr = "193.23.218.76:34000" // Default address for the relay server's control port
+	effectiveHostIDPrefix   = "EFFECTIVE_HOST_ID:"  // Prefix to look for in server's stdout
 )
 
+// getExecutablePath determines the full path to an application executable
+// located in the same directory as the launcher.
 func getExecutablePath(appName string) (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -46,10 +49,9 @@ func main() {
 	mainWindow := fyneApp.NewWindow("Application Launcher")
 	mainWindow.SetFixedSize(true)
 
-	// Allow user to specify relay server address
 	relayServerEntry := widget.NewEntry()
 	relayServerEntry.SetPlaceHolder("Relay Server IP:Port (e.g., 193.23.218.76:34000)")
-	relayServerEntry.SetText(defaultRelayControlAddr) // Default value
+	relayServerEntry.SetText(defaultRelayControlAddr)
 
 	hostButton := widget.NewButton("Become a Host (Direct & Relay)", func() {
 		log.Println("INFO: 'Become a Host' clicked.")
@@ -61,12 +63,27 @@ func main() {
 		}
 		currentRelayAddr := relayServerEntry.Text
 		if currentRelayAddr == "" {
-			currentRelayAddr = defaultRelayControlAddr // Fallback if user clears it
+			currentRelayAddr = defaultRelayControlAddr
 		}
 
-		cmd := exec.Command(serverPath, "-relay=true", "-hostID=MyGamingRig", "-relayServer="+currentRelayAddr)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// The -hostID flag for server.exe is now more of a suggestion or for non-relay mode.
+		// The relay server will assign the definitive ID if relay is used.
+		cmd := exec.Command(serverPath, "-relay=true", "-hostID=LauncherHost", "-relayServer="+currentRelayAddr)
+
+		// Capture stdout to get the EFFECTIVE_HOST_ID
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("ERROR: Failed to create stdout pipe for server: %v", err)
+			dialog.ShowError(fmt.Errorf("Failed to create stdout pipe: %v", err), mainWindow)
+			return
+		}
+		// Capture stderr for logging
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			log.Printf("ERROR: Failed to create stderr pipe for server: %v", err)
+			dialog.ShowError(fmt.Errorf("Failed to create stderr pipe: %v", err), mainWindow)
+			return
+		}
 
 		err = cmd.Start()
 		if err != nil {
@@ -74,8 +91,68 @@ func main() {
 			dialog.ShowError(fmt.Errorf("Failed to launch server: %v", err), mainWindow)
 			return
 		}
-		log.Printf("INFO: Server '%s' launched (PID: %d). Using relay: %s", serverPath, cmd.Process.Pid, currentRelayAddr)
-		dialog.ShowInformation("Host Mode", fmt.Sprintf("Server application '%s' launched.\nRelay server: %s.", serverAppName, currentRelayAddr), mainWindow)
+		log.Printf("INFO: Server '%s' launched (PID: %d). Using relay: %s. Waiting for Host ID...", serverPath, cmd.Process.Pid, currentRelayAddr)
+		initialDialog := dialog.NewInformation("Host Mode", fmt.Sprintf("Server '%s' launched.\nRelay: %s\nWaiting for Host ID from server...", serverAppName, currentRelayAddr), mainWindow)
+		initialDialog.Show()
+
+		// Goroutine to read server's stdout
+		go func() {
+			scanner := bufio.NewScanner(stdoutPipe)
+			for scanner.Scan() {
+				line := scanner.Text()
+				log.Printf("SERVER_STDOUT: %s", line) // Log all stdout from server
+				if strings.HasPrefix(line, effectiveHostIDPrefix) {
+					hostID := strings.TrimSpace(strings.TrimPrefix(line, effectiveHostIDPrefix))
+					log.Printf("INFO: Captured Effective Host ID from server: %s", hostID)
+
+					// Update UI on the main Fyne thread
+					fyneApp.SendNotification(&fyne.Notification{
+						Title: "Host ID Ready", Content: fmt.Sprintf("Host ID: %s", hostID),
+					})
+
+					// Close the initial "waiting" dialog and show one with the ID and copy button
+					initialDialog.Hide() // Or find a way to update it if possible / preferred
+
+					idLabel := widget.NewLabel(fmt.Sprintf("Your Host ID: %s", hostID))
+					idLabel.Wrapping = fyne.TextWrapWord
+					copyButton := widget.NewButton("Copy ID", func() {
+						mainWindow.Clipboard().SetContent(hostID)
+						dialog.ShowInformation("Copied", "Host ID copied to clipboard!", mainWindow)
+					})
+					content := container.NewVBox(
+						widget.NewLabel("Server is running and registered."),
+						idLabel,
+						copyButton,
+					)
+					dialog.ShowCustom("Host Ready", "Close", content, mainWindow)
+					return // Stop scanning once ID is found
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				log.Printf("ERROR: Reading server stdout: %v", err)
+			}
+		}()
+
+		// Goroutine to read server's stderr
+		go func() {
+			scanner := bufio.NewScanner(stderrPipe)
+			for scanner.Scan() {
+				log.Printf("SERVER_STDERR: %s", scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				log.Printf("ERROR: Reading server stderr: %v", err)
+			}
+		}()
+
+		// Goroutine to wait for server process to exit
+		go func() {
+			errWait := cmd.Wait()
+			log.Printf("INFO: Server process (PID: %d) exited. Error (if any): %v", cmd.Process.Pid, errWait)
+			// Optionally, notify the user that the server has stopped.
+			fyneApp.SendNotification(&fyne.Notification{Title: "Server Stopped", Content: "The host server process has exited."})
+			// If the "Host Ready" dialog is modal, it might block this.
+			// Consider updating a status label in the main window instead of multiple modal dialogs.
+		}()
 	})
 
 	connectButton := widget.NewButton("Connect to Remote PC", func() {
@@ -93,7 +170,7 @@ func main() {
 		hostButton,
 		connectButton,
 	))
-	mainWindow.Resize(fyne.NewSize(550, 280)) // Adjusted size for new entry
+	mainWindow.Resize(fyne.NewSize(550, 280))
 	mainWindow.CenterOnScreen()
 	mainWindow.ShowAndRun()
 }
@@ -113,8 +190,9 @@ func launchClientApplication(clientPath, targetAddress string, isRelayConn bool,
 	}
 
 	cmd := exec.Command(clientPath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Pipe client's stdout/stderr to launcher's log for debugging
+	clientStdout, _ := cmd.StdoutPipe()
+	clientStderr, _ := cmd.StderrPipe()
 
 	err := cmd.Start()
 	if err != nil {
@@ -124,14 +202,33 @@ func launchClientApplication(clientPath, targetAddress string, isRelayConn bool,
 		return
 	}
 
+	// Log client's stdout
+	go func() {
+		scanner := bufio.NewScanner(clientStdout)
+		for scanner.Scan() {
+			log.Printf("CLIENT_STDOUT: %s", scanner.Text())
+		}
+	}()
+	// Log client's stderr
+	go func() {
+		scanner := bufio.NewScanner(clientStderr)
+		for scanner.Scan() {
+			log.Printf("CLIENT_STDERR: %s", scanner.Text())
+		}
+	}()
+
 	successMsg := fmt.Sprintf("Client '%s' launched (PID: %d) targeting %s (via %s).",
 		filepath.Base(clientPath), cmd.Process.Pid, targetAddress, connectionType)
 	log.Printf("INFO: %s", successMsg)
 	dialog.ShowInformation("Client Mode", successMsg, parentWindow)
+
+	go func() {
+		errWait := cmd.Wait()
+		log.Printf("INFO: Client process (PID: %d) exited. Error (if any): %v", cmd.Process.Pid, errWait)
+	}()
 }
 
 // connectViaRelay attempts connection through a relay server.
-// relayControlAddr is the full IP:Port of the relay server's control service.
 func connectViaRelay(targetHostID string, relayControlAddr string) (connected bool, relayDataAddrForClient string, sessionToken string, err error) {
 	log.Printf("INFO: [Relay] Attempting to connect to HostID '%s' via relay server %s", targetHostID, relayControlAddr)
 
@@ -155,7 +252,7 @@ func connectViaRelay(targetHostID string, relayControlAddr string) (connected bo
 	if err != nil {
 		return false, "", "", fmt.Errorf("failed to read response from relay server: %w", err)
 	}
-	conn.SetReadDeadline(time.Time{})
+	conn.SetReadDeadline(time.Time{}) // Clear deadline
 
 	response = strings.TrimSpace(response)
 	log.Printf("INFO: [Relay] Received from relay: %s", response)
@@ -165,12 +262,9 @@ func connectViaRelay(targetHostID string, relayControlAddr string) (connected bo
 		if len(parts) < 3 {
 			return false, "", "", fmt.Errorf("invalid SESSION_READY response from relay (expected port and token): %s", response)
 		}
-		// SESSION_READY <dynamic_port_str> <session_token>
 		dynamicPortStr := parts[1]
 		sessionTokenOut := parts[2]
 
-		// The launcher already knows the relay's public IP (host part of relayControlAddr).
-		// Combine it with the dynamic port received.
 		relayHost, _, err := net.SplitHostPort(relayControlAddr)
 		if err != nil {
 			return false, "", "", fmt.Errorf("could not parse host from relayControlAddr '%s': %w", relayControlAddr, err)
@@ -186,7 +280,7 @@ func connectViaRelay(targetHostID string, relayControlAddr string) (connected bo
 	}
 }
 
-// promptForAddressAndConnect now takes relayServerControlAddr from the UI
+// promptForAddressAndConnect handles the UI and logic for connecting to a host.
 func promptForAddressAndConnect(parentWindow fyne.Window, a fyne.App, relayServerControlAddr string) {
 	inputWindow := a.NewWindow("Connect to Host")
 	inputWindow.SetFixedSize(true)
@@ -212,7 +306,7 @@ func promptForAddressAndConnect(parentWindow fyne.Window, a fyne.App, relayServe
 				return
 			}
 
-			isPotentiallyDirect := strings.Contains(userInput, ":")
+			isPotentiallyDirect := strings.Contains(userInput, ":") && !strings.ContainsAny(userInput, " \t\n") // Basic check for IP:Port
 			var directErr error
 
 			if isPotentiallyDirect {
@@ -232,18 +326,19 @@ func promptForAddressAndConnect(parentWindow fyne.Window, a fyne.App, relayServe
 				}
 				if ctxDirect.Err() == context.DeadlineExceeded {
 					log.Printf("WARN: Direct connection to %s timed out.", userInput)
+					directErr = fmt.Errorf("direct connection timed out") // More user-friendly error
 				} else {
 					log.Printf("WARN: Direct connection to %s failed: %v", userInput, errDial)
 				}
 			} else {
 				log.Printf("INFO: Input '%s' does not look like IP:PORT, skipping direct attempt, proceeding to relay.", userInput)
-				directErr = fmt.Errorf("input format not suitable for direct dial")
+				directErr = fmt.Errorf("input not in IP:Port format for direct connection")
 			}
 
-			targetHostID := userInput
+			// If direct connection failed or was skipped, try relay
+			targetHostID := userInput // Assume userInput is HostID for relay
 			log.Printf("INFO: Direct connection failed or skipped. Attempting connection via relay for HostID '%s' using relay server %s...", targetHostID, relayServerControlAddr)
 
-			// Pass the relayServerControlAddr (from UI) to connectViaRelay
 			relayConnected, relayedAddressForClient, sessionToken, errRelay := connectViaRelay(targetHostID, relayServerControlAddr)
 
 			if relayConnected {

@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os" // Required for os.Stdout
 	"strings"
 	"sync"
 	"time"
@@ -48,49 +49,37 @@ var (
 	portFlag           = flag.Int("port", 32212, "The server port for direct gRPC connections")
 	enableRelay        = flag.Bool("relay", false, "Enable relay mode to connect through a relay server")
 	relayServerAddr    = flag.String("relayServer", "localhost:34000", "Address of the relay server's control port (IP:PORT)")
-	hostIDFlag         = flag.String("hostID", "auto", "Unique ID for this host. Set to 'auto' or empty to auto-generate.") // Default to auto
+	hostIDFlag         = flag.String("hostID", "auto", "Unique ID for this host if not using relay, or as a suggestion. 'auto' for random.")
 	fyneApp            fyne.App
+	fyneWindow         fyne.Window // Made global for title updates
 	serverStatusLabel  *widget.Label
 	relayStatusLabel   *widget.Label
-	hostIDDisplayLabel *widget.Label // For displaying the Host ID in server's own UI
+	hostIDDisplayLabel *widget.Label
 )
 
-const hostIDReadyPrefix = "HOST_ID_READY:" // Prefix for launcher to detect the Host ID
+const effectiveHostIDPrefix = "EFFECTIVE_HOST_ID:" // Prefix for launcher to detect the final Host ID
 
 // generateRandomHostID creates a random alphanumeric string.
-// byteLength determines the number of random bytes; the resulting hex string will be twice as long.
-// For an 8-character ID, use byteLength = 4.
 func generateRandomHostID(byteLength int) string {
 	bytes := make([]byte, byteLength)
 	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to a less random but still unique-ish ID if crypto/rand fails
 		log.Printf("WARN: Could not generate crypto/rand bytes for Host ID: %v. Using timestamp fallback.", err)
-		// Generate an 8-digit number from timestamp
 		return fmt.Sprintf("%08d", time.Now().UnixNano()%100000000)
 	}
-	return hex.EncodeToString(bytes) // Example: 4 bytes -> 8 hex characters
+	return hex.EncodeToString(bytes)
 }
 
 func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Determine Host ID
-	actualHostID := *hostIDFlag
-	if strings.ToLower(actualHostID) == "auto" || actualHostID == "" {
-		actualHostID = generateRandomHostID(4) // Generate an 8-character hex ID
-		log.Printf("INFO: Auto-generated Host ID: %s", actualHostID)
+	initialHostID := *hostIDFlag
+	if strings.ToLower(initialHostID) == "auto" || initialHostID == "" {
+		initialHostID = generateRandomHostID(4) // Generate an 8-character hex ID
+		log.Printf("INFO: Auto-generated initial Host ID: %s", initialHostID)
 	} else {
-		log.Printf("INFO: Using provided Host ID: %s", actualHostID)
+		log.Printf("INFO: Using provided initial Host ID: %s", initialHostID)
 	}
-
-	// Print the Host ID to stdout for the launcher to capture.
-	// This should be one of the first things printed.
-	fmt.Printf("%s%s\n", hostIDReadyPrefix, actualHostID)
-	// Ensure it's flushed, especially if server might not print much else immediately.
-	// However, fmt.Printf with \n usually flushes on line-buffered terminals.
-	// For robustness with pipes, an explicit flush might be considered if issues arise,
-	// but often not needed for simple line-based output.
 
 	localGrpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", *portFlag))
 	if err != nil {
@@ -119,23 +108,29 @@ func main() {
 	reflection.Register(grpcServer)
 
 	fyneApp = app.New()
-	// Update window title to include the actual Host ID
-	fyneWindow := fyneApp.NewWindow(fmt.Sprintf("gRPC Server - Host ID: %s", actualHostID))
+	fyneWindow = fyneApp.NewWindow(fmt.Sprintf("gRPC Server - Initializing...")) // Initial title
 
 	serverStatusLabel = widget.NewLabel(fmt.Sprintf("Direct gRPC: Listening on %s", localGrpcServerAddr))
 	serverStatusLabel.Alignment = fyne.TextAlignCenter
 
-	// Label to display the Host ID in the server's UI
-	hostIDDisplayLabel = widget.NewLabel(fmt.Sprintf("Your Host ID: %s\n(Share this with clients for relay connection)", actualHostID))
-	hostIDDisplayLabel.Wrapping = fyne.TextWrapWord // Wrap text if ID is long or window is small
+	hostIDDisplayLabel = widget.NewLabel("Determining Host ID...")
+	hostIDDisplayLabel.Wrapping = fyne.TextWrapWord
 	hostIDDisplayLabel.Alignment = fyne.TextAlignCenter
 
 	relayStatusLabel = widget.NewLabel("Relay: Disabled")
-	if *enableRelay {
-		// Use the actualHostID when displaying status and connecting to relay
-		relayStatusLabel.SetText(fmt.Sprintf("Relay: Connecting to %s as '%s'...", *relayServerAddr, actualHostID))
-	}
 	relayStatusLabel.Alignment = fyne.TextAlignCenter
+
+	if *enableRelay {
+		hostIDDisplayLabel.SetText("Registering with Relay server...")
+		relayStatusLabel.SetText(fmt.Sprintf("Relay: Connecting to %s...", *relayServerAddr))
+	} else {
+		// Not using relay, so initialHostID is the effective ID.
+		hostIDDisplayLabel.SetText(fmt.Sprintf("Your Host ID: %s\n(Share this for direct connection)", initialHostID))
+		fyneWindow.SetTitle(fmt.Sprintf("gRPC Server - Host ID: %s (Direct)", initialHostID))
+		// Print effective host ID for launcher
+		fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, initialHostID)
+		log.Printf("INFO: Effective Host ID (direct): %s", initialHostID)
+	}
 
 	quitButton := widget.NewButton("Shutdown Server", func() {
 		log.Println("INFO: Shutdown button clicked. Stopping server...")
@@ -144,17 +139,16 @@ func main() {
 	})
 
 	fyneWindow.SetContent(container.NewVBox(
-		hostIDDisplayLabel, // Display the Host ID prominently
+		hostIDDisplayLabel,
 		serverStatusLabel,
 		relayStatusLabel,
 		quitButton,
 	))
-	fyneWindow.Resize(fyne.NewSize(500, 250)) // Adjusted size for new label
-	// fyneWindow.SetFixedSize(true) // Consider allowing resize if Host ID is long
+	fyneWindow.Resize(fyne.NewSize(500, 250))
 
 	fyneWindow.SetOnClosed(func() {
 		log.Println("INFO: Fyne window closed by user. Initiating server shutdown...")
-		go grpcServer.GracefulStop() // Ensure gRPC server stops
+		go grpcServer.GracefulStop()
 		log.Println("INFO: Server shutdown process initiated from OnClosed.")
 	})
 
@@ -162,7 +156,7 @@ func main() {
 		log.Printf("INFO: gRPC Server starting for direct connections at %s", localGrpcServerAddr)
 		if err := grpcServer.Serve(localGrpcListener); err != nil {
 			log.Printf("ERROR: Failed to serve direct gRPC: %v", err)
-			if fyneApp != nil && serverStatusLabel != nil { // Check if UI elements are initialized
+			if fyneApp != nil && serverStatusLabel != nil {
 				fyneApp.SendNotification(&fyne.Notification{
 					Title:   "gRPC Server Error",
 					Content: fmt.Sprintf("Failed to serve direct gRPC: %v", err),
@@ -174,8 +168,8 @@ func main() {
 	}()
 
 	if *enableRelay {
-		// Pass the determined actualHostID to the relay management function
-		go s.manageRelayRegistrationAndTunnels(*relayServerAddr, actualHostID, localGrpcServerAddr)
+		// Pass initialHostID for logging purposes before relay assigns one.
+		go s.manageRelayRegistrationAndTunnels(*relayServerAddr, initialHostID, localGrpcServerAddr)
 	}
 
 	log.Println("INFO: Starting Fyne application UI...")
@@ -183,66 +177,75 @@ func main() {
 
 	log.Println("INFO: Fyne application has exited.")
 	log.Println("INFO: Ensuring gRPC server is stopped...")
-	grpcServer.GracefulStop() // Final attempt to stop
+	grpcServer.GracefulStop()
 	log.Println("INFO: gRPC server shutdown complete. Exiting application.")
 }
 
-// manageRelayRegistrationAndTunnels now uses the actualHostID passed to it.
-func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, actualHostID, localGrpcSvcAddr string) {
+// manageRelayRegistrationAndTunnels handles connection and communication with the relay server.
+// localInitialIDHint is used for logging before the relay assigns an ID.
+func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localInitialIDHint, localGrpcSvcAddr string) {
 	var controlConn net.Conn
 	var err error
+	var currentRegisteredRelayID string // Stores the ID assigned and confirmed by the relay server
 
-	for {
-		log.Printf("INFO: [Relay] Attempting to connect to relay control server %s for Host ID '%s'...", relayCtrlAddrFull, actualHostID)
+	for { // Connection loop
+		log.Printf("INFO: [Relay] Attempting to connect to relay control server %s (local ID hint: '%s')...", relayCtrlAddrFull, localInitialIDHint)
 		if relayStatusLabel != nil {
-			relayStatusLabel.SetText(fmt.Sprintf("Relay: Connecting to %s as '%s'...", relayCtrlAddrFull, actualHostID))
+			relayStatusLabel.SetText(fmt.Sprintf("Relay: Connecting to %s...", relayCtrlAddrFull))
+			relayStatusLabel.Refresh()
 		}
 
 		controlConn, err = net.DialTimeout("tcp", relayCtrlAddrFull, 10*time.Second)
 		if err != nil {
 			log.Printf("WARN: [Relay] Failed to connect to relay control server %s: %v. Retrying in 10s...", relayCtrlAddrFull, err)
 			if relayStatusLabel != nil {
-				relayStatusLabel.SetText(fmt.Sprintf("Relay: Failed to connect. Retrying..."))
+				relayStatusLabel.SetText("Relay: Connection failed. Retrying...")
+				relayStatusLabel.Refresh()
 			}
 			time.Sleep(10 * time.Second)
 			continue
 		}
+		log.Printf("INFO: [Relay] Connected to relay control server: %s", controlConn.RemoteAddr())
 		break // Successfully connected
 	}
 	defer controlConn.Close()
-	log.Printf("INFO: [Relay] Connected to relay control server: %s", controlConn.RemoteAddr())
-	if relayStatusLabel != nil {
-		relayStatusLabel.SetText(fmt.Sprintf("Relay: Connected to %s. Registering as '%s'...", relayCtrlAddrFull, actualHostID))
-	}
 
-	registerCmd := fmt.Sprintf("REGISTER_HOST %s\n", actualHostID) // Use the actualHostID
+	// Register with the relay server - send no ID, relay will assign one.
+	registerCmd := "REGISTER_HOST\n"
 	_, err = fmt.Fprint(controlConn, registerCmd)
 	if err != nil {
-		log.Printf("ERROR: [Relay] Failed to send REGISTER_HOST command for ID '%s': %v", actualHostID, err)
+		log.Printf("ERROR: [Relay] Failed to send REGISTER_HOST command: %v", err)
 		if relayStatusLabel != nil {
-			relayStatusLabel.SetText(fmt.Sprintf("Relay: Registration failed for ID %s.", actualHostID))
+			relayStatusLabel.SetText("Relay: Registration command failed.")
+			relayStatusLabel.Refresh()
 		}
-		return // Cannot proceed if registration fails
+		// Optionally, could trigger a reconnect here by returning and letting main loop restart goroutine,
+		// or implement retry logic within this function. For now, it exits the goroutine.
+		return
 	}
 	log.Printf("INFO: [Relay] Sent: %s", strings.TrimSpace(registerCmd))
+	if relayStatusLabel != nil {
+		relayStatusLabel.SetText("Relay: Sent registration. Waiting for ID...")
+		relayStatusLabel.Refresh()
+	}
 
 	reader := bufio.NewReader(controlConn)
-	for {
+	for { // Message processing loop
 		response, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
-				log.Printf("INFO: [Relay] Control connection to relay server closed (EOF) for Host ID '%s'. Reconnecting...", actualHostID)
+				log.Printf("INFO: [Relay] Control connection to relay server closed (EOF) for Host ID '%s'. Reconnecting...", currentRegisteredRelayID)
 			} else {
-				log.Printf("ERROR: [Relay] Error reading from relay control connection for Host ID '%s': %v. Reconnecting...", actualHostID, err)
+				log.Printf("ERROR: [Relay] Error reading from relay control connection for Host ID '%s': %v. Reconnecting...", currentRegisteredRelayID, err)
 			}
-			controlConn.Close() // Close the old connection before retrying
+			controlConn.Close()
 			// Re-initiate the connection and registration process
-			go s.manageRelayRegistrationAndTunnels(relayCtrlAddrFull, actualHostID, localGrpcSvcAddr)
+			go s.manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localInitialIDHint, localGrpcSvcAddr)
 			return // Exit this goroutine, new one will take over
 		}
 
 		response = strings.TrimSpace(response)
-		log.Printf("INFO: [Relay] Received from relay for Host ID '%s': %s", actualHostID, response)
+		log.Printf("INFO: [Relay] Received from relay (current/potential Host ID '%s'): %s", currentRegisteredRelayID, response)
 		parts := strings.Fields(response)
 		if len(parts) == 0 {
 			continue
@@ -251,87 +254,103 @@ func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, actualHost
 
 		switch command {
 		case "HOST_REGISTERED":
-			if len(parts) > 1 && parts[1] == actualHostID {
-				log.Printf("INFO: [Relay] Successfully registered with relay server as Host ID: %s", parts[1])
+			if len(parts) < 2 {
+				log.Printf("ERROR: [Relay] Invalid HOST_REGISTERED response: %s", response)
+				// Potentially disconnect and retry registration
 				if relayStatusLabel != nil {
-					relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting for clients.", actualHostID))
+					relayStatusLabel.SetText("Relay: Invalid registration response.")
+					relayStatusLabel.Refresh()
 				}
-			} else {
-				log.Printf("WARN: [Relay] Received HOST_REGISTERED for an unexpected ID. Expected: %s, Got response: %s", actualHostID, response)
+				continue
 			}
+			assignedID := parts[1]
+			currentRegisteredRelayID = assignedID // This is the authoritative ID from the relay
+			log.Printf("INFO: [Relay] Successfully registered with relay server. Assigned Host ID: %s", currentRegisteredRelayID)
+
+			// Print effective host ID for launcher
+			fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, currentRegisteredRelayID)
+			log.Printf("INFO: Effective Host ID (relay): %s", currentRegisteredRelayID)
+
+			// Update Fyne UI with the relay-assigned ID
+			if hostIDDisplayLabel != nil {
+				hostIDDisplayLabel.SetText(fmt.Sprintf("Your Relay Host ID: %s\n(Share this with clients)", currentRegisteredRelayID))
+				hostIDDisplayLabel.Refresh()
+			}
+			if fyneWindow != nil {
+				fyneWindow.SetTitle(fmt.Sprintf("gRPC Server - Host ID: %s (Relay)", currentRegisteredRelayID))
+				// fyneWindow.Canvas().Refresh(fyneWindow.Content()) // May not be needed for title
+			}
+			if relayStatusLabel != nil {
+				relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting...", currentRegisteredRelayID))
+				relayStatusLabel.Refresh()
+			}
+
 		case "CREATE_TUNNEL":
 			if len(parts) < 3 {
-				log.Printf("ERROR: [Relay] Invalid CREATE_TUNNEL command for Host ID '%s': %s", actualHostID, response)
+				log.Printf("ERROR: [Relay] Invalid CREATE_TUNNEL command for Host ID '%s': %s", currentRegisteredRelayID, response)
+				continue
+			}
+			if currentRegisteredRelayID == "" {
+				log.Printf("ERROR: [Relay] Received CREATE_TUNNEL before host ID was registered: %s", response)
 				continue
 			}
 			dynamicPortStr := parts[1]
 			sessionToken := parts[2]
-			log.Printf("INFO: [Relay] Received CREATE_TUNNEL for Host ID '%s', session %s, relay dynamic port %s", actualHostID, sessionToken, dynamicPortStr)
+			log.Printf("INFO: [Relay] Received CREATE_TUNNEL for Host ID '%s', session %s, relay dynamic port %s", currentRegisteredRelayID, sessionToken, dynamicPortStr)
 
 			relayHostIP, _, err := net.SplitHostPort(relayCtrlAddrFull)
 			if err != nil {
 				log.Printf("ERROR: [Relay] Could not parse host IP from relayCtrlAddrFull '%s': %v", relayCtrlAddrFull, err)
-				continue // Cannot proceed without relay host IP
+				continue
 			}
 			relayDataAddrForHost := net.JoinHostPort(relayHostIP, dynamicPortStr)
-			log.Printf("INFO: [Relay] Host '%s' will connect to relay data endpoint: %s for session %s", actualHostID, relayDataAddrForHost, sessionToken)
+			log.Printf("INFO: [Relay] Host '%s' will connect to relay data endpoint: %s for session %s", currentRegisteredRelayID, relayDataAddrForHost, sessionToken)
 
 			if relayStatusLabel != nil {
-				relayStatusLabel.SetText(fmt.Sprintf("Relay: Client connecting via session %s...", sessionToken[:8]))
+				relayStatusLabel.SetText(fmt.Sprintf("Relay: Client connecting (ID: %s)...", currentRegisteredRelayID))
+				relayStatusLabel.Refresh()
 			}
-			// Pass actualHostID for better logging context in handleHostSideTunnel
-			go s.handleHostSideTunnel(localGrpcSvcAddr, relayDataAddrForHost, sessionToken, actualHostID)
+			// Pass the confirmed currentRegisteredRelayID to the tunnel handler
+			go s.handleHostSideTunnel(localGrpcSvcAddr, relayDataAddrForHost, sessionToken, currentRegisteredRelayID)
 		default:
-			log.Printf("WARN: [Relay] Unknown command from relay server for Host ID '%s': %s", actualHostID, response)
+			log.Printf("WARN: [Relay] Unknown command from relay server for Host ID '%s': %s", currentRegisteredRelayID, response)
 		}
 	}
 }
 
-// handleHostSideTunnel now includes actualHostID for logging.
-func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost, sessionToken, actualHostID string) {
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Attempting to connect to relay data endpoint %s", sessionToken, actualHostID, relayDataAddrForHost)
+// handleHostSideTunnel now uses registeredHostID for logging and UI updates.
+func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost, sessionToken, registeredHostID string) {
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Attempting to connect to relay data endpoint %s", sessionToken, registeredHostID, relayDataAddrForHost)
 	hostProxyConn, err := net.DialTimeout("tcp", relayDataAddrForHost, 10*time.Second)
 	if err != nil {
-		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to connect to relay data endpoint %s: %v", sessionToken, actualHostID, relayDataAddrForHost, err)
+		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to connect to relay data endpoint %s: %v", sessionToken, registeredHostID, relayDataAddrForHost, err)
 		return
 	}
 	defer hostProxyConn.Close()
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connected to relay data endpoint: %s", sessionToken, actualHostID, hostProxyConn.RemoteAddr())
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connected to relay data endpoint: %s", sessionToken, registeredHostID, hostProxyConn.RemoteAddr())
 
 	identCmd := fmt.Sprintf("SESSION_TOKEN %s HOST_PROXY\n", sessionToken)
 	_, err = fmt.Fprint(hostProxyConn, identCmd)
 	if err != nil {
-		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to send session token identification: %v", sessionToken, actualHostID, err)
+		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to send session token identification: %v", sessionToken, registeredHostID, err)
 		return
 	}
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Sent identification: %s", sessionToken, actualHostID, strings.TrimSpace(identCmd))
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Sent identification: %s", sessionToken, registeredHostID, strings.TrimSpace(identCmd))
 
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connecting to local gRPC service at %s", sessionToken, actualHostID, localGrpcServiceAddr)
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connecting to local gRPC service at %s", sessionToken, registeredHostID, localGrpcServiceAddr)
 	localServiceConn, err := net.DialTimeout("tcp", localGrpcServiceAddr, 5*time.Second)
 	if err != nil {
-		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to connect to local gRPC service %s: %v", sessionToken, actualHostID, localGrpcServiceAddr, err)
+		log.Printf("ERROR: [Tunnel %s Host %s] Host-side: Failed to connect to local gRPC service %s: %v", sessionToken, registeredHostID, localGrpcServiceAddr, err)
 		return
 	}
 	defer localServiceConn.Close()
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connected to local gRPC service. Starting proxy.", sessionToken, actualHostID)
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Connected to local gRPC service. Starting proxy.", sessionToken, registeredHostID)
+
+	originalRelayStatusText := ""
 	if relayStatusLabel != nil {
-		originalText := relayStatusLabel.Text // Save current text
-		relayStatusLabel.SetText(fmt.Sprintf("Relay: Active session %s", sessionToken[:8]))
-		// Restore previous status after a delay
-		go func() {
-			time.Sleep(5 * time.Second) // Display active session for 5 seconds
-			// Check if the label text is still the "Active session" one before changing
-			if relayStatusLabel != nil && relayStatusLabel.Text == fmt.Sprintf("Relay: Active session %s", sessionToken[:8]) {
-				// Restore to "Registered" or the original text if it was different
-				// For simplicity, assume originalText was "Registered..." if it wasn't "Disabled" or "Connecting..."
-				// A more robust way would be to manage server state.
-				if strings.HasPrefix(originalText, "Relay: Registered") {
-					relayStatusLabel.SetText(originalText)
-				} else {
-					relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting for clients.", actualHostID))
-				}
-			}
-		}()
+		originalRelayStatusText = relayStatusLabel.Text // Save current text
+		relayStatusLabel.SetText(fmt.Sprintf("Relay: Active session (ID: %s)", registeredHostID))
+		relayStatusLabel.Refresh()
 	}
 
 	var wg sync.WaitGroup
@@ -341,8 +360,8 @@ func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost
 		defer hostProxyConn.Close()
 		defer localServiceConn.Close()
 		written, errCopy := io.Copy(localServiceConn, hostProxyConn)
-		logContext := fmt.Sprintf("[Tunnel %s Host %s]", sessionToken, actualHostID)
-		if errCopy != nil && errCopy != io.EOF && !strings.Contains(errCopy.Error(), "use of closed network connection") {
+		logContext := fmt.Sprintf("[Tunnel %s Host %s]", sessionToken, registeredHostID)
+		if errCopy != nil && !isNetworkCloseError(errCopy) {
 			log.Printf("ERROR: %s Host-side: Error copying from relay to local: %v (bytes: %d)", logContext, errCopy, written)
 		} else {
 			log.Printf("INFO: %s Host-side: Finished copying from relay to local. Bytes: %d. Error (if any): %v", logContext, written, errCopy)
@@ -353,18 +372,29 @@ func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost
 		defer localServiceConn.Close()
 		defer hostProxyConn.Close()
 		written, errCopy := io.Copy(hostProxyConn, localServiceConn)
-		logContext := fmt.Sprintf("[Tunnel %s Host %s]", sessionToken, actualHostID)
-		if errCopy != nil && errCopy != io.EOF && !strings.Contains(errCopy.Error(), "use of closed network connection") {
+		logContext := fmt.Sprintf("[Tunnel %s Host %s]", sessionToken, registeredHostID)
+		if errCopy != nil && !isNetworkCloseError(errCopy) {
 			log.Printf("ERROR: %s Host-side: Error copying from local to relay: %v (bytes: %d)", logContext, errCopy, written)
 		} else {
 			log.Printf("INFO: %s Host-side: Finished copying from local to relay. Bytes: %d. Error (if any): %v", logContext, written, errCopy)
 		}
 	}()
 	wg.Wait()
-	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Proxying finished.", sessionToken, actualHostID)
-	// After proxying, restore the relay status label if it was showing active session
-	if relayStatusLabel != nil && relayStatusLabel.Text == fmt.Sprintf("Relay: Active session %s", sessionToken[:8]) {
-		relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting for clients.", actualHostID))
+	log.Printf("INFO: [Tunnel %s Host %s] Host-side: Proxying finished.", sessionToken, registeredHostID)
+
+	// Restore relay status label after session ends
+	if relayStatusLabel != nil {
+		// Check if the text is still "Active session..." before changing it back
+		// This avoids overriding a newer status (e.g., "Reconnecting...")
+		if strings.HasPrefix(relayStatusLabel.Text, "Relay: Active session") {
+			if originalRelayStatusText != "" && !strings.HasPrefix(originalRelayStatusText, "Relay: Active session") {
+				relayStatusLabel.SetText(originalRelayStatusText) // Restore previous specific text if sensible
+			} else {
+				// Default back to generic registered state
+				relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting...", registeredHostID))
+			}
+			relayStatusLabel.Refresh()
+		}
 	}
 }
 
@@ -382,11 +412,27 @@ func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    clientCertPool,
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   "localhost", // ServerName for server's own TLS config
+		ServerName:   "localhost",
 	}
 	return credentials.NewTLS(config), nil
 }
 
 func (s *server) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
 	return &pb.PingResponse{ClientTimestampNano: req.GetClientTimestampNano()}, nil
+}
+
+// isNetworkCloseError checks if the error is a common network connection closed error.
+func isNetworkCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	s := err.Error()
+	// Add more specific error checks if needed, e.g., for specific OS network errors
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection reset by peer") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "forcibly closed") // Windows specific
 }
