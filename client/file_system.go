@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	pb "control_grpc/gen/proto" // Assuming this path is correct
@@ -20,83 +21,87 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// createTreeChildrenFunc is the callback for widget.Tree to get child nodes.
+// Global variables for file system UI and gRPC client
+var (
+	AppInstance     fyne.App                     // To be initialized by main.go
+	filesClient     pb.FileTransferServiceClient // To be initialized
+	mainWindow      fyne.Window                  // Main window, to be initialized
+	refreshTreeChan = make(chan string, 1)
+	treeDataMutex   sync.RWMutex
+	nodesMap        = make(map[string]*pb.FSNode)
+	childrenMap     = make(map[string][]string)
+)
+
+// InitializeSharedGlobals allows main.go to set essential shared global variables.
+func InitializeSharedGlobals(theApp fyne.App, mainWin fyne.Window, client pb.FileTransferServiceClient) {
+	AppInstance = theApp
+	mainWindow = mainWin
+	filesClient = client
+	log.Println("INFO (file_system.go): Shared globals (AppInstance, mainWindow, filesClient) have been set.")
+}
+
+// createTreeChildrenFunc remains the same
 func createTreeChildrenFunc(id widget.TreeNodeID) []widget.TreeNodeID {
 	treeDataMutex.RLock()
 	children, ok := childrenMap[id]
 	treeDataMutex.RUnlock()
-
-	if id == "" {
-		// log.Printf("Tree: getChildren for ROOT ('%s'). childrenMap[''] exists: %v, count: %d", id, ok, len(children))
-	} else {
-		// log.Printf("Tree: getChildren for '%s'. childrenMap['%s'] exists: %v, count: %d", id, id, ok, len(children))
-	}
-
 	if ok {
-		return children // Children have been loaded previously
+		return children
 	}
-	// Children not loaded yet. Loading is triggered by OnBranchOpened.
 	return nil
 }
 
-// isTreeNodeBranchFunc is the callback for widget.Tree to check if a node is a branch.
+// isTreeNodeBranchFunc remains the same
 func isTreeNodeBranchFunc(id widget.TreeNodeID) bool {
-	if id == "" { // The root "" is always conceptually a branch.
+	if id == "" {
 		return true
 	}
 	treeDataMutex.RLock()
 	node, ok := nodesMap[id]
 	treeDataMutex.RUnlock()
-	isBranch := ok && node.Type == pb.FSNode_FOLDER
-	// log.Printf("Tree: isBranch check for '%s' -> %v (Node found: %v, Type Folder: %v)", id, isBranch, ok, ok && node.Type == pb.FSNode_FOLDER)
-	return isBranch
+	return ok && node.Type == pb.FSNode_FOLDER
 }
 
-// createTreeNodeFunc is the callback for widget.Tree to create a new node widget.
+// createTreeNodeFunc remains the same
 func createTreeNodeFunc(isBranch bool) fyne.CanvasObject {
-	icon := widget.NewIcon(nil) // Placeholder icon
+	icon := widget.NewIcon(nil)
 	label := widget.NewLabel("Template")
-	downloadButton := widget.NewButtonWithIcon("", theme.DownloadIcon(), nil) // Action set in update
-	downloadButton.Hide()                                                     // Hide by default
-
-	// HBox places items side-by-side
+	downloadButton := widget.NewButtonWithIcon("", theme.DownloadIcon(), nil)
+	downloadButton.Hide()
 	return container.NewHBox(icon, label, downloadButton)
 }
 
-// updateTreeNodeFunc is the callback for widget.Tree to update an existing node widget.
+// updateTreeNodeFunc remains the same, relies on AppInstance being set
 func updateTreeNodeFunc(id widget.TreeNodeID, isBranch bool, node fyne.CanvasObject) {
 	if id == "" {
-		// log.Printf("Tree: update called for root ID ('%s'). Skipping visual update for root itself.", id)
-		return // Root "" doesn't have a visual representation to update directly in the tree.
+		return
 	}
 
 	treeDataMutex.RLock()
 	fsNode, ok := nodesMap[id]
 	treeDataMutex.RUnlock()
 
-	hbox := node.(*fyne.Container) // Assuming HBox(icon, label, downloadButton)
+	hbox := node.(*fyne.Container)
 	icon := hbox.Objects[0].(*widget.Icon)
 	label := hbox.Objects[1].(*widget.Label)
 	downloadButton := hbox.Objects[2].(*widget.Button)
 
 	if ok {
-		displayName := filepath.Base(fsNode.Path)
-		if fsNode.Path == "/" {
-			displayName = "/" // Posix root
-		} else if runtime.GOOS == "windows" && strings.HasSuffix(fsNode.Path, `:\`) {
-			displayName = fsNode.Path // Windows drive root (e.g., "C:\")
-		} else if displayName == "" && fsNode.Type == pb.FSNode_FOLDER {
-			displayName = fsNode.Path // Fallback for other cases
-		} else if strings.HasPrefix(displayName, "[Error:") || strings.HasPrefix(displayName, "[Server Error:") {
-			// If the base name is an error message, use it directly
+		displayName := fsNode.Name
+		if displayName == "" {
+			displayName = filepath.Base(fsNode.Path)
 		}
-
+		if fsNode.Path == "/" {
+			displayName = "/"
+		} else if runtime.GOOS == "windows" && strings.HasSuffix(fsNode.Path, `:\`) {
+			displayName = fsNode.Path
+		}
 		label.SetText(displayName)
 
 		if fsNode.Type == pb.FSNode_FOLDER {
 			icon.SetResource(theme.FolderIcon())
 			downloadButton.Show()
-			buttonNodeID := id // Capture for closure
+			buttonNodeID := id
 			downloadButton.OnTapped = func() {
 				log.Printf("Folder download button clicked for: %s", buttonNodeID)
 				treeDataMutex.RLock()
@@ -104,17 +109,21 @@ func updateTreeNodeFunc(id widget.TreeNodeID, isBranch bool, node fyne.CanvasObj
 				treeDataMutex.RUnlock()
 				if nodeOk && nodeToDownload.Type == pb.FSNode_FOLDER {
 					log.Printf("Initiating folder download as zip for: %s", nodeToDownload.Path)
-					// mainWindow should be accessible here if in the same package
-					go startDownload(nodeToDownload.Path, true)
+					if AppInstance == nil { // Check if AppInstance is initialized
+						log.Println("ERROR: AppInstance is nil in download button callback (updateTreeNodeFunc)!")
+						if mainWindow != nil {
+							dialog.ShowError(fmt.Errorf("Application instance not available for download window."), mainWindow)
+						}
+						return
+					}
+					go startDownload(AppInstance, nodeToDownload.Path, true)
 				} else {
 					log.Printf("Error: Download button tapped for non-folder or unknown node: %s", buttonNodeID)
 				}
 			}
-		} else { // FSNode_FILE or other (including error nodes displayed as files)
-			// For error nodes, filepath.Base(fsNode.Path) will be the error message.
-			// We can use a generic file icon or a specific error icon if desired.
+		} else {
 			if strings.HasPrefix(displayName, "[Error:") || strings.HasPrefix(displayName, "[Server Error:") {
-				icon.SetResource(theme.ErrorIcon()) // Use error icon for error nodes
+				icon.SetResource(theme.ErrorIcon())
 			} else {
 				icon.SetResource(theme.FileIcon())
 			}
@@ -130,53 +139,39 @@ func updateTreeNodeFunc(id widget.TreeNodeID, isBranch bool, node fyne.CanvasObj
 	}
 }
 
-// onTreeBranchOpened is called when a tree branch is opened by the user.
-// It triggers fetching children for that branch if not already loaded.
+// onTreeBranchOpened remains the same
 func onTreeBranchOpened(id widget.TreeNodeID, fileTree *widget.Tree) {
 	log.Printf("Tree branch opened: %s", id)
-
 	treeDataMutex.RLock()
 	_, childrenLoaded := childrenMap[id]
-	nodeInfo, nodeExists := nodesMap[id] // nodeExists will be false for root ""
+	nodeInfo, nodeExists := nodesMap[id]
 	treeDataMutex.RUnlock()
 
 	needsLoading := false
-	if id == "" { // Root node
+	if id == "" {
 		if !childrenLoaded {
-			log.Printf("Root node ('%s') needs loading.", id)
 			needsLoading = true
-		} else {
-			log.Printf("Root node ('%s') children already loaded.", id)
 		}
-	} else if nodeExists && nodeInfo.Type == pb.FSNode_FOLDER { // Non-root folder
+	} else if nodeExists && nodeInfo.Type == pb.FSNode_FOLDER {
 		if !childrenLoaded {
-			log.Printf("Node '%s' (folder) needs loading.", id)
 			needsLoading = true
-		} else {
-			log.Printf("Node '%s' (folder) children already loaded.", id)
 		}
-	} else if !nodeExists && id != "" {
-		log.Printf("Node '%s' does not exist in nodesMap. Cannot open.", id)
-	} else if nodeInfo.Type != pb.FSNode_FOLDER { // Could be a file or an error node
-		log.Printf("Node '%s' is not a folder type. Cannot open.", id)
 	}
 
 	if needsLoading {
-		go fetchChildren(id) // Asynchronously fetch children
+		log.Printf("Node '%s' needs loading children.", id)
+		go fetchChildren(id)
+	} else {
+		log.Printf("Node '%s' children already loaded or not a loadable branch.", id)
 	}
 }
 
-// onTreeBranchClosed is called when a tree branch is closed.
+// onTreeBranchClosed remains the same
 func onTreeBranchClosed(id widget.TreeNodeID) {
 	log.Printf("Tree branch closed: %s", id)
-	// Optional: Clear childrenMap[id] to free memory and force reload on next open.
-	// treeDataMutex.Lock()
-	// delete(childrenMap, id)
-	// treeDataMutex.Unlock()
 }
 
-// onTreeNodeSelected is called when a tree node is selected (single click).
-// Triggers download for files.
+// onTreeNodeSelected now relies on AppInstance being set
 func onTreeNodeSelected(id string) {
 	treeDataMutex.RLock()
 	node, ok := nodesMap[id]
@@ -185,28 +180,45 @@ func onTreeNodeSelected(id string) {
 	if ok {
 		log.Printf("Selected: %s (Path: %s, Type: %s)", id, node.Path, node.Type)
 		if node.Type == pb.FSNode_FILE {
-			// Ensure it's not an error node before attempting download
-			if !(strings.HasPrefix(filepath.Base(node.Path), "[Error:") || strings.HasPrefix(filepath.Base(node.Path), "[Server Error:")) {
+			displayName := node.Name
+			if displayName == "" {
+				displayName = filepath.Base(node.Path)
+			}
+			if !(strings.HasPrefix(displayName, "[Error:") || strings.HasPrefix(displayName, "[Server Error:")) {
 				log.Printf("File selected: %s. Initiating download.", node.Path)
-				// mainWindow should be accessible here
-				go startDownload(node.Path, false)
+				if AppInstance == nil { // Check if AppInstance is initialized
+					log.Println("ERROR: AppInstance is nil in onTreeNodeSelected!")
+					if mainWindow != nil { // Fallback for dialog if mainWindow is available
+						dialog.ShowError(fmt.Errorf("Application instance not available for download."), mainWindow)
+					}
+					return // Crucial: exit if AppInstance is nil
+				}
+				go startDownload(AppInstance, node.Path, false)
 			} else {
 				log.Printf("Error node selected: %s. No download action.", node.Path)
 			}
-		} else {
-			log.Printf("Folder selected: %s. No download action on single click (use download button or context menu).", node.Path)
 		}
 	} else {
 		log.Printf("Selected unknown node ID: %s", id)
 	}
 }
 
-// fetchChildren fetches child nodes for a given parent path from the server.
+// fetchChildren remains the same, relies on filesClient being set
 func fetchChildren(parentPath string) {
 	log.Printf("Fetching children for path: '%s'", parentPath)
 	if filesClient == nil {
-		log.Println("Error: filesClient is nil in fetchChildren. Cannot fetch.")
-		// Optionally, update UI to show this error for the specific parentPath
+		log.Println("Error: filesClient is nil in fetchChildren.")
+		treeDataMutex.Lock()
+		errorMsg := "[Error: Client not connected]"
+		errorNodePath := filepath.Join(parentPath, errorMsg)
+		nodesMap[errorNodePath] = &pb.FSNode{Path: errorNodePath, Name: errorMsg, Type: pb.FSNode_FILE}
+		childrenMap[parentPath] = []string{errorNodePath}
+		treeDataMutex.Unlock()
+		select {
+		case refreshTreeChan <- parentPath:
+		default:
+			log.Printf("Warning: Refresh channel full, could not signal for parent: '%s'", parentPath)
+		}
 		return
 	}
 
@@ -214,27 +226,21 @@ func fetchChildren(parentPath string) {
 	defer cancel()
 
 	req := &pb.FSRequest{Path: parentPath}
-	log.Printf("Attempting gRPC call GetFS for path: '%s'", parentPath)
 	res, err := filesClient.GetFS(ctx, req)
 
-	treeDataMutex.Lock() // Lock once before modifying shared maps
+	treeDataMutex.Lock()
+	defer treeDataMutex.Unlock()
+
 	if err != nil {
 		log.Printf("Error fetching children for '%s': %v", parentPath, err)
-		s, ok := status.FromError(err)
-		errorMsg := ""
-		if ok {
-			errorMsg = fmt.Sprintf("[Error %s: %s]", s.Code(), s.Message())
-		} else {
-			errorMsg = fmt.Sprintf("[Error: %v]", err)
-		}
-		// Create an error node. The error message is part of the path.
+		s, _ := status.FromError(err)
+		errorMsg := fmt.Sprintf("[Error %s: %s]", s.Code(), s.Message())
 		errorNodePath := filepath.Join(parentPath, errorMsg)
-		if len(errorNodePath) > 250 { // Path segments can have limits
+		if len(errorNodePath) > 250 {
 			errorNodePath = errorNodePath[:247] + "..."
 		}
-		// Ensure no field 'Name' is used here
-		nodesMap[errorNodePath] = &pb.FSNode{Path: errorNodePath, Type: pb.FSNode_FILE} // Represent error as a file-like node
-		childrenMap[parentPath] = []string{errorNodePath}                               // Show only the error node as child
+		nodesMap[errorNodePath] = &pb.FSNode{Path: errorNodePath, Name: filepath.Base(errorNodePath), Type: pb.FSNode_FILE}
+		childrenMap[parentPath] = []string{errorNodePath}
 	} else if res.ErrorMessage != "" {
 		log.Printf("Server reported error for path '%s': %s", parentPath, res.ErrorMessage)
 		errorMsg := fmt.Sprintf("[Server Error: %s]", res.ErrorMessage)
@@ -242,28 +248,28 @@ func fetchChildren(parentPath string) {
 		if len(errorNodePath) > 250 {
 			errorNodePath = errorNodePath[:247] + "..."
 		}
-		// Ensure no field 'Name' is used here
-		nodesMap[errorNodePath] = &pb.FSNode{Path: errorNodePath, Type: pb.FSNode_FILE}
+		nodesMap[errorNodePath] = &pb.FSNode{Path: errorNodePath, Name: filepath.Base(errorNodePath), Type: pb.FSNode_FILE}
 		childrenMap[parentPath] = []string{errorNodePath}
 	} else {
 		log.Printf("Received %d children for path '%s'", len(res.Nodes), parentPath)
 		childPaths := make([]string, 0, len(res.Nodes))
-		childrenMap[parentPath] = []string{} // Clear previous children for this parent
+		childrenMap[parentPath] = []string{}
 
 		for _, node := range res.Nodes {
 			if node == nil || node.Path == "" {
 				log.Printf("Warning: Received nil or empty node for parent '%s'. Skipping.", parentPath)
 				continue
 			}
-			nodesMap[node.Path] = node // Store/update node info
+			if node.Name == "" {
+				node.Name = filepath.Base(node.Path)
+			}
+			nodesMap[node.Path] = node
 			childPaths = append(childPaths, node.Path)
 		}
 		childrenMap[parentPath] = childPaths
 		log.Printf("Updated childrenMap for '%s' with %d paths", parentPath, len(childPaths))
 	}
-	treeDataMutex.Unlock() // Unlock after modifications
 
-	// Signal the main thread to refresh the tree view for the parent
 	select {
 	case refreshTreeChan <- parentPath:
 		log.Printf("Sent refresh signal for parent: '%s'", parentPath)
@@ -272,9 +278,8 @@ func fetchChildren(parentPath string) {
 	}
 }
 
-// startDownload initiates the download process by showing a save dialog.
-// mainWindow should be accessible here if all files are in `package main`.
-func startDownload(remotePath string, isFolder bool) {
+// startDownload remains the same, relies on AppInstance and mainWindow being set
+func startDownload(theApp fyne.App, remotePath string, isFolder bool) {
 	log.Printf("Initiating download for remote path: '%s' (Is Folder: %v)", remotePath, isFolder)
 
 	if filesClient == nil {
@@ -284,15 +289,26 @@ func startDownload(remotePath string, isFolder bool) {
 		}
 		return
 	}
+	if theApp == nil { // Should be AppInstance from global, already checked by caller
+		log.Println("Error: Fyne app instance is nil in startDownload (should not happen if called correctly).")
+		if mainWindow != nil {
+			dialog.ShowError(fmt.Errorf("application instance not available"), mainWindow)
+		}
+		return
+	}
+	if mainWindow == nil {
+		log.Println("Error: mainWindow is nil in startDownload. Cannot show save dialog.")
+		var parentWinForDialog fyne.Window
+		if drv := theApp.Driver(); drv != nil && len(drv.AllWindows()) > 0 {
+			parentWinForDialog = drv.AllWindows()[0]
+		}
+		dialog.NewError(fmt.Errorf("main window not available for save dialog"), parentWinForDialog).Show()
+		return
+	}
 
 	localFileName := filepath.Base(remotePath)
 	if isFolder {
-		localFileName += ".zip" // Suggest .zip extension for folders
-	}
-
-	if mainWindow == nil {
-		log.Println("Error: mainWindow is nil in startDownload. Cannot show save dialog.")
-		return
+		localFileName += ".zip"
 	}
 
 	saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
@@ -303,52 +319,62 @@ func startDownload(remotePath string, isFolder bool) {
 		}
 		if writer == nil {
 			log.Println("File save dialog cancelled by user.")
-			return // User cancelled
+			return
 		}
-
-		localFilePath := writer.URI().Path() // Get local path from URI
+		localFilePath := writer.URI().Path()
 		log.Printf("User selected local path: '%s' for remote '%s'", localFilePath, remotePath)
-
-		// Proceed with download in a new goroutine
-		// Pass mainWindow to performDownload if it were not a package global
-		go performDownload(remotePath, localFilePath, writer, isFolder)
-
+		go performDownload(theApp, remotePath, localFilePath, writer, isFolder)
 	}, mainWindow)
 
 	saveDialog.SetFileName(localFileName)
 	saveDialog.Show()
 }
 
-// performDownload handles the gRPC streaming and file writing.
-// mainWindow should be accessible here.
-func performDownload(remotePath string, localFilePath string, writer fyne.URIWriteCloser, isFolder bool) {
+// performDownload: "Download Complete" dialog is now restored.
+func performDownload(theApp fyne.App, remotePath string, localFilePath string, writer fyne.URIWriteCloser, isFolder bool) {
 	log.Printf("Performing download of '%s' (Folder: %v) to '%s'", remotePath, isFolder, localFilePath)
-	defer writer.Close() // Ensure writer is closed on exit
+	defer writer.Close()
 
-	if mainWindow == nil {
-		log.Println("Error: mainWindow is nil in performDownload. Cannot show progress/error dialogs.")
-		// Attempt to proceed without dialogs, or return early
-		// For now, we'll log and let it try, but dialogs won't appear.
+	if theApp == nil {
+		log.Println("CRITICAL: Fyne app instance is nil in performDownload. Cannot create download window.")
+		return
 	}
 
-	var progressDialog dialog.Dialog
-	if mainWindow != nil {
-		progressLabel := widget.NewLabel(fmt.Sprintf("Downloading %s...", filepath.Base(localFilePath)))
-		progressContent := container.NewVBox(progressLabel)
-		progressDialog = dialog.NewCustom("Downloading", "Cancel", progressContent, mainWindow)
-	}
+	dlWindow := theApp.NewWindow(fmt.Sprintf("Downloading %s", filepath.Base(localFilePath)))
+	// dlWindow.SetMaster() // This was removed, which fixed the app closing issue.
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	statusLabel := widget.NewLabel(fmt.Sprintf("Starting download of %s...", filepath.Base(localFilePath)))
+	progressBar := widget.NewProgressBar()
+	progressBar.Min = 0
+	progressBytesLabel := widget.NewLabel("0 B / 0 B")
+	progressBytesLabel.Alignment = fyne.TextAlignCenter
 
-	if progressDialog != nil {
-		progressDialog.SetOnClosed(func() {
-			log.Printf("Download dialog closed for '%s'. Cancelling gRPC context.", remotePath)
-			cancel()
-		})
-		progressDialog.Show()
-		defer progressDialog.Hide()
-	}
+	ctx, cancelFunc := context.WithCancel(context.Background())
+
+	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		log.Printf("Download cancel button clicked for '%s'", remotePath)
+		cancelFunc()
+	})
+
+	dlWindow.SetContent(container.NewVBox(
+		statusLabel,
+		progressBar,
+		progressBytesLabel,
+		cancelButton,
+	))
+	dlWindow.Resize(fyne.NewSize(400, 150))
+	dlWindow.CenterOnScreen()
+
+	dlWindow.SetCloseIntercept(func() {
+		log.Printf("Download window close intercepted for '%s'. Cancelling download.", remotePath)
+		cancelFunc()
+	})
+
+	dlWindow.Show()
+	defer func() {
+		log.Printf("Closing download window for %s", remotePath)
+		dlWindow.Close()
+	}()
 
 	var streamClient interface {
 		Recv() (*pb.FileChunk, error)
@@ -356,12 +382,10 @@ func performDownload(remotePath string, localFilePath string, writer fyne.URIWri
 	var streamErr error
 
 	if isFolder {
-		log.Printf("Calling DownloadFolderAsZip for remote path: '%s'", remotePath)
 		s, e := filesClient.DownloadFolderAsZip(ctx, &pb.FileRequest{Path: remotePath})
 		streamClient = s
 		streamErr = e
 	} else {
-		log.Printf("Calling DownloadFile for remote path: '%s'", remotePath)
 		s, e := filesClient.DownloadFile(ctx, &pb.FileRequest{Path: remotePath})
 		streamClient = s
 		streamErr = e
@@ -369,46 +393,51 @@ func performDownload(remotePath string, localFilePath string, writer fyne.URIWri
 
 	if streamErr != nil {
 		log.Printf("Error initiating download stream for '%s': %v", remotePath, streamErr)
+		dlWindow.Hide()
+		parentDialogWindow := mainWindow
 		if status.Code(streamErr) == codes.Canceled {
 			log.Printf("Download of '%s' was cancelled by user before stream start.", remotePath)
-			if mainWindow != nil { // Only show dialog if mainWindow is available
-				// dialog.ShowInformation("Download Cancelled", "Download was cancelled.", mainWindow)
-			}
 		} else {
-			showDownloadError(fmt.Sprintf("Failed to start download for %s", filepath.Base(localFilePath)), streamErr)
+			showDownloadError("Failed to start download", streamErr, parentDialogWindow)
 		}
 		return
 	}
 
 	totalBytesReceived := int64(0)
+	var totalSize int64 = 0
+	firstChunk := true
+
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Context cancelled during download of '%s' (before Recv).", remotePath)
-			if mainWindow != nil {
-				dialog.ShowInformation("Download Cancelled", fmt.Sprintf("Download of %s was cancelled.", filepath.Base(localFilePath)), mainWindow)
-			}
+			log.Printf("Context cancelled during download of '%s'. Error: %v", remotePath, ctx.Err())
 			return
 		default:
 		}
 
 		chunk, err := streamClient.Recv()
 		if err != nil {
+			parentDialogWindow := mainWindow
 			if err == io.EOF {
 				log.Printf("Download of '%s' finished successfully. Total bytes: %d", remotePath, totalBytesReceived)
-				if mainWindow != nil {
-					dialog.ShowInformation("Download Complete", fmt.Sprintf("Downloaded %s successfully to %s", filepath.Base(localFilePath), localFilePath), mainWindow)
-				}
-				break
-			}
-			log.Printf("Error receiving chunk for '%s': %v", remotePath, err)
-			if status.Code(err) == codes.Canceled || ctx.Err() == context.Canceled {
-				log.Printf("Download of '%s' was cancelled during streaming.", remotePath)
-				if mainWindow != nil {
-					dialog.ShowInformation("Download Cancelled", fmt.Sprintf("Download of %s was cancelled.", filepath.Base(localFilePath)), mainWindow)
+				// Restore the "Download Complete" dialog
+				if parentDialogWindow != nil {
+					dialog.ShowInformation("Download Complete",
+						fmt.Sprintf("Downloaded %s successfully to %s\n(%s received)",
+							filepath.Base(localFilePath),
+							localFilePath,
+							formatBytes(totalBytesReceived)),
+						parentDialogWindow)
+				} else {
+					log.Println("mainWindow is nil, cannot show download complete dialog.")
 				}
 			} else {
-				showDownloadError(fmt.Sprintf("Failed during download of %s", filepath.Base(localFilePath)), err)
+				log.Printf("Error receiving chunk for '%s': %v", remotePath, err)
+				if status.Code(err) == codes.Canceled || ctx.Err() == context.Canceled {
+					log.Printf("Download of '%s' was cancelled during streaming.", remotePath)
+				} else {
+					showDownloadError(fmt.Sprintf("Failed during download of %s", filepath.Base(localFilePath)), err, parentDialogWindow)
+				}
 			}
 			return
 		}
@@ -418,27 +447,61 @@ func performDownload(remotePath string, localFilePath string, writer fyne.URIWri
 			continue
 		}
 
+		if firstChunk {
+			if chunk.Metadata != nil && chunk.Metadata.TotalSize > 0 {
+				totalSize = chunk.Metadata.TotalSize
+				progressBar.Max = float64(totalSize)
+				statusLabel.SetText(fmt.Sprintf("Downloading %s...", filepath.Base(localFilePath)))
+			} else {
+				statusLabel.SetText(fmt.Sprintf("Downloading %s (size unknown)...", filepath.Base(localFilePath)))
+			}
+			firstChunk = false
+		}
+
 		n, writeErr := writer.Write(chunk.Content)
 		if writeErr != nil {
 			log.Printf("Error writing chunk to local file '%s': %v", localFilePath, writeErr)
-			showDownloadError(fmt.Sprintf("Error writing %s to disk", filepath.Base(localFilePath)), writeErr)
+			parentDialogWindow := mainWindow
+			showDownloadError(fmt.Sprintf("Error writing %s to disk", filepath.Base(localFilePath)), writeErr, parentDialogWindow)
 			return
 		}
 		totalBytesReceived += int64(n)
+
+		if totalSize > 0 {
+			progressBar.SetValue(float64(totalBytesReceived))
+			progressBytesLabel.SetText(fmt.Sprintf("%s / %s", formatBytes(totalBytesReceived), formatBytes(totalSize)))
+		} else {
+			progressBytesLabel.SetText(fmt.Sprintf("%s received", formatBytes(totalBytesReceived)))
+		}
 	}
 }
 
-// showDownloadError is a helper to display download-related errors.
-// mainWindow should be accessible here.
-func showDownloadError(title string, err error) {
-	if mainWindow == nil {
-		log.Printf("Error: mainWindow is nil in showDownloadError. Cannot show dialog. Title: %s, Error: %v", title, err)
+// showDownloadError remains the same
+func showDownloadError(title string, err error, parent fyne.Window) {
+	if parent == nil {
+		log.Printf("Error: parent window is nil in showDownloadError. Cannot show dialog. Title: %s, Error: %v", title, err)
 		return
 	}
 	s, ok := status.FromError(err)
+	var errMsg string
 	if ok {
-		dialog.ShowError(fmt.Errorf("%s (gRPC Error %s: %s)", title, s.Code(), s.Message()), mainWindow)
+		errMsg = fmt.Sprintf("%s (gRPC Error %s: %s)", title, s.Code(), s.Message())
 	} else {
-		dialog.ShowError(fmt.Errorf("%s: %v", title, err), mainWindow)
+		errMsg = fmt.Sprintf("%s: %v", title, err)
 	}
+	dialog.ShowError(fmt.Errorf(errMsg), parent)
+}
+
+// formatBytes remains the same
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

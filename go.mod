@@ -6,6 +6,8 @@ require (
 	fyne.io/fyne/v2 v2.5.4
 	github.com/StackExchange/wmi v1.2.1
 	github.com/go-vgo/robotgo v0.110.5
+	github.com/google/uuid v1.6.0
+	github.com/iamacarpet/go-winpty v1.0.4
 	github.com/kbinani/screenshot v0.0.0-20250118074034-a3924b7bbc8c
 	github.com/u2takey/ffmpeg-go v0.5.0
 	golang.org/x/crypto v0.32.0
@@ -32,7 +34,6 @@ require (
 	github.com/go-text/render v0.2.0 // indirect
 	github.com/go-text/typesetting v0.2.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/jeandeaual/go-locale v0.0.0-20240223122105-ce5225dcaa49 // indirect
 	github.com/jezek/xgb v1.1.1 // indirect

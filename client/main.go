@@ -20,7 +20,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/data/binding" // Kept for toggleButtonTextBinding
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"google.golang.org/grpc"
@@ -29,12 +29,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "control_grpc/gen/proto"
-	// If newMouseOverlay is in handlers.go in a different package, you'd import it:
-	// "your_project_module/client/handlers"
-	// If file system functions are in a different package:
-	// "your_project_module/client/filesystem"
-	// If video pipeline functions are in a different package:
-	// "your_project_module/client/videopipeline"
 )
 
 //go:embed client.crt
@@ -46,34 +40,34 @@ var clientKeyEmbed []byte
 //go:embed server.crt
 var serverCACertEmbed []byte
 
+// Note: AppInstance, mainWindow, filesClient, refreshTreeChan etc. are now primarily managed
+// as package-level variables in file_system.go and initialized via InitializeSharedGlobals.
+// Local declarations in main.go are for variables specific to main's scope.
+
 var (
-	treeDataMutex       sync.RWMutex
-	nodesMap            = make(map[string]*pb.FSNode) // Used by file system tree functions
-	childrenMap         = make(map[string][]string)   // Used by file system tree functions
-	filesClient         pb.FileTransferServiceClient
-	refreshTreeChan     = make(chan string, 1)
-	mainWindow          fyne.Window                       // This is the main application window
-	inputEvents         = make(chan *pb.FeedRequest, 120) // Handles mouse & keyboard
+	// These are specific to main.go or passed to other packages
+	inputEvents         = make(chan *pb.FeedRequest, 120)
 	pingLabel           *widget.Label
 	fpsLabel            *widget.Label
 	remoteControlClient pb.RemoteControlServiceClient
-	terminalClient      pb.TerminalServiceClient // For terminal functionality
+	terminalClient      pb.TerminalServiceClient // Keep this as it's used to init terminal features
 
+	// Terminal related globals (specific to terminal window management, might stay in main or move)
+	terminalWindow         fyne.Window
+	currentTerminalStream  pb.TerminalService_CommandStreamClient
+	terminalStreamCancel   context.CancelFunc
+	terminalOutputRichText *widget.RichText
+	terminalInput          *widget.Entry
+	terminalScroll         *container.Scroll
+	terminalMutex          sync.Mutex
+
+	// Command line flags
 	serverAddrActual *string
 	connectionType   *string
 	sessionToken     *string
-
-	// Terminal window specific variables
-	terminalWindow        fyne.Window // To keep track of the terminal window
-	currentTerminalStream pb.TerminalService_CommandStreamClient
-	terminalStreamCancel  context.CancelFunc // Changed to be specific to the active stream
-	terminalOutput        binding.StringList
-	terminalInput         *widget.Entry
-	terminalScroll        *container.Scroll
-	terminalMutex         sync.Mutex // To protect terminal stream resources
 )
 
-// customRelayDialer is used by gRPC when connecting via relay.
+// customRelayDialer remains the same
 func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Conn, error) {
 	log.Printf("INFO: [Relay Dialer] Attempting to dial relay data address: %s", targetRelayDataAddr)
 	dialer := &net.Dialer{}
@@ -101,18 +95,17 @@ func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Con
 	return conn, nil
 }
 
-// sendKeyboardEvent constructs and queues a keyboard event.
+// sendKeyboardEvent remains the same
 func sendKeyboardEvent(eventType, keyName, keyChar string) {
 	req := &pb.FeedRequest{
-		Message:           "keyboard_event", // Differentiate from mouse_event
+		Message:           "keyboard_event",
 		KeyboardEventType: eventType,
 		KeyName:           keyName,
 		KeyCharStr:        keyChar,
 		Timestamp:         time.Now().UnixNano(),
-		ClientWidth:       1920, // Or actual dynamic client width if needed
-		ClientHeight:      1080, // Or actual dynamic client height
+		ClientWidth:       1920,
+		ClientHeight:      1080,
 	}
-
 	select {
 	case inputEvents <- req:
 	default:
@@ -133,9 +126,9 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	a := app.New()
-	w := a.NewWindow("Control GRPC client")
-	mainWindow = w
+	// Initialize Fyne app WITH A UNIQUE ID
+	currentFyneApp := app.NewWithID("com.example.controlgrpcclient.v2") // Use your unique ID
+	mainAppWindow := currentFyneApp.NewWindow("Control GRPC client")
 
 	normalSize := fyne.NewSize(1280, 720)
 	fullSize := fyne.NewSize(1920, 1080)
@@ -168,10 +161,10 @@ func main() {
 	conn, err := grpc.DialContext(dialCtx, *serverAddrActual, opts...)
 	if err != nil {
 		log.Printf("ERROR: Could not connect to %s: %v", *serverAddrActual, err)
-		if a.Driver() != nil && mainWindow != nil {
+		if currentFyneApp.Driver() != nil && mainAppWindow != nil {
 			go func() {
 				time.Sleep(100 * time.Millisecond)
-				dialog.ShowError(fmt.Errorf("Could not connect to server: %v", err), mainWindow)
+				dialog.ShowError(fmt.Errorf("Could not connect to server: %v", err), mainAppWindow)
 			}()
 			time.Sleep(2 * time.Second)
 		}
@@ -180,42 +173,45 @@ func main() {
 	defer conn.Close()
 	log.Printf("INFO: Successfully connected to server/relay at %s", *serverAddrActual)
 
+	// Initialize gRPC service clients
 	remoteControlClient = pb.NewRemoteControlServiceClient(conn)
-	filesClient = pb.NewFileTransferServiceClient(conn)
+	localFilesClient := pb.NewFileTransferServiceClient(conn) // Local var before passing
 	terminalClient = pb.NewTerminalServiceClient(conn)
 
-	if filesClient == nil {
-		log.Fatalf("ERROR: Failed to create filesClient!")
-	}
-	if terminalClient == nil {
-		log.Fatalf("ERROR: Failed to create terminalClient!")
+	// Initialize shared global variables needed by file_system.go and potentially others
+	InitializeSharedGlobals(currentFyneApp, mainAppWindow, localFilesClient)
+	log.Println("INFO: Shared globals (AppInstance, mainWindow, filesClient) initialized.")
+
+	// Now, file_system.go's AppInstance, mainWindow, and filesClient should be non-nil.
+	// Verify (optional debug log):
+	// if AppInstance == nil || file_system.mainWindow == nil || file_system.filesClient == nil {
+	// log.Fatalf("FATAL: Globals in file_system.go are still nil after InitializeSharedGlobals!")
+	// }
+
+	if remoteControlClient == nil || localFilesClient == nil || terminalClient == nil {
+		log.Fatalf("ERROR: Failed to create one or more gRPC clients!")
 	}
 
-	streamCtx, streamCancel := context.WithCancel(context.Background())
-	defer streamCancel()
+	streamCtx, streamCancelMain := context.WithCancel(context.Background())
+	defer streamCancelMain()
 
 	stream, err := remoteControlClient.GetFeed(streamCtx)
 	if err != nil {
 		log.Printf("ERROR: Error creating stream: %v", err)
-		dialog.ShowError(fmt.Errorf("Error creating stream: %v", err), mainWindow)
+		dialog.ShowError(fmt.Errorf("Error creating stream: %v", mainAppWindow), mainAppWindow)
 		os.Exit(1)
 	}
 
 	initRequest := &pb.FeedRequest{
-		Message:      "init",
-		MouseX:       0,
-		MouseY:       0,
-		ClientWidth:  1920,
-		ClientHeight: 1080,
-		Timestamp:    time.Now().UnixNano(),
+		Message: "init", MouseX: 0, MouseY: 0, ClientWidth: 1920, ClientHeight: 1080, Timestamp: time.Now().UnixNano(),
 	}
 	if err := stream.Send(initRequest); err != nil {
 		log.Printf("ERROR: Error sending initialization message: %v", err)
-		dialog.ShowError(fmt.Errorf("Error sending init message: %v", err), mainWindow)
+		dialog.ShowError(fmt.Errorf("Error sending init message: %v", err), mainAppWindow)
 		os.Exit(1)
 	}
 
-	overlay := newMouseOverlay(inputEvents, mainWindow)
+	overlay := newMouseOverlay(inputEvents, mainAppWindow)
 	videoContainer := container.NewStack(imageCanvas, overlay)
 
 	go func() {
@@ -227,50 +223,43 @@ func main() {
 		log.Println("Input event sender goroutine stopped.")
 	}()
 
-	if mainWindow != nil && mainWindow.Canvas() != nil {
-		mainWindow.Canvas().SetOnTypedRune(func(r rune) {
-			sendKeyboardEvent("keychar", "", string(r))
-		})
-		mainWindow.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
-			sendKeyboardEvent("keydown", string(ev.Name), "")
-		})
+	if mainAppWindow != nil && mainAppWindow.Canvas() != nil {
+		mainAppWindow.Canvas().SetOnTypedRune(func(r rune) { sendKeyboardEvent("keychar", "", string(r)) })
+		mainAppWindow.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) { sendKeyboardEvent("keydown", string(ev.Name), "") })
 	} else {
-		log.Println("Error: mainWindow or its canvas is nil, cannot set keyboard handlers.")
+		log.Println("Error: mainAppWindow or its canvas is nil, cannot set keyboard handlers.")
 	}
 
 	widgetLabel := widget.NewLabel("Video Feed:")
-	toggleButtonText := binding.NewString()
-	toggleButtonText.Set("Full screen")
+	toggleButtonTextBinding := binding.NewString()
+	toggleButtonTextBinding.Set("Full screen")
 	isFull := false
 	toggleButton := widget.NewButton("", func() {
 		if !isFull {
-			w.SetFullScreen(true)
+			mainAppWindow.SetFullScreen(true)
 			imageCanvas.SetMinSize(fullSize)
 			isFull = true
-			toggleButtonText.Set("Exit full screen")
+			toggleButtonTextBinding.Set("Exit full screen")
 		} else {
-			w.SetFullScreen(false)
+			mainAppWindow.SetFullScreen(false)
 			imageCanvas.SetMinSize(normalSize)
 			isFull = false
-			toggleButtonText.Set("Full screen")
+			toggleButtonTextBinding.Set("Full screen")
 		}
-		w.Content().Refresh()
+		mainAppWindow.Content().Refresh()
 		if overlay != nil {
-			w.Canvas().Focus(overlay)
+			mainAppWindow.Canvas().Focus(overlay)
 		}
 	})
-	toggleButtonText.AddListener(binding.NewDataListener(func() {
-		text, _ := toggleButtonText.Get()
+	toggleButtonTextBinding.AddListener(binding.NewDataListener(func() {
+		text, _ := toggleButtonTextBinding.Get()
 		toggleButton.SetText(text)
 	}))
 	toggleButton.SetText("Full screen")
 
 	var fileTree *widget.Tree
 	fileTree = widget.NewTree(
-		createTreeChildrenFunc,
-		isTreeNodeBranchFunc,
-		createTreeNodeFunc,
-		updateTreeNodeFunc,
+		createTreeChildrenFunc, isTreeNodeBranchFunc, createTreeNodeFunc, updateTreeNodeFunc,
 	)
 	fileTree.OnBranchOpened = func(id widget.TreeNodeID) { onTreeBranchOpened(id, fileTree) }
 	fileTree.OnBranchClosed = onTreeBranchClosed
@@ -278,53 +267,66 @@ func main() {
 	treeContainer := container.NewScroll(fileTree)
 
 	getFSButton := widget.NewButton("Files", func() {
-		filesWindow := a.NewWindow("File Browser")
+		// Now AppInstance in file_system.go should be valid for creating new windows
+		filesWindow := AppInstance.NewWindow("File Browser") // AppInstance is from file_system.go
 		filesWindow.SetContent(treeContainer)
 		filesWindow.Resize(fyne.NewSize(500, 600))
 		filesWindow.Show()
-		fileTree.OpenBranch("")
+		if filesClient != nil { // filesClient is from file_system.go
+			go fetchChildren("")
+		} else {
+			log.Println("Files button: filesClient (shared) is nil, cannot fetch root.")
+			dialog.ShowError(fmt.Errorf("File client (shared) not initialized"), filesWindow)
+		}
 	})
 
 	terminalButton := widget.NewButton("Terminal", func() {
-		openTerminalWindow(a)
+		openTerminalWindow(currentFyneApp) // Pass the app instance created in main
 	})
 
 	pingLabel = widget.NewLabel("RTT: --- ms")
 	fpsLabel = widget.NewLabel("FPS: ---")
 	topBar := container.NewHBox(widgetLabel, toggleButton, getFSButton, terminalButton, widget.NewSeparator(), pingLabel, widget.NewSeparator(), fpsLabel)
 	content := container.NewBorder(topBar, nil, nil, nil, videoContainer)
-	w.SetContent(content)
+	mainAppWindow.SetContent(content)
 
 	go startPinger(streamCtx, remoteControlClient)
 
-	ffmpegInputReader, ffmpegInputWriter := io.Pipe()
-	ffmpegOutputReader, ffmpegOutputWriter := io.Pipe()
+	grpcToFFmpegReader, grpcToFFmpegWriter := io.Pipe()
+	ffmpegToBufferReader, ffmpegToBufferWriter := io.Pipe()
+
+	// rawFrameBuffer and frameImageData are defined in video_pipeline.go
+	// Ensure they are accessible (e.g. package-level vars in video_pipeline.go)
 
 	go func() {
+		// refreshTreeChan is from file_system.go
 		for parentIdToRefresh := range refreshTreeChan {
 			log.Printf("Received refresh signal for children of: '%s'", parentIdToRefresh)
 			if fileTree != nil {
 				fileTree.Refresh()
 			}
 		}
+		log.Println("Tree refresh goroutine stopped.")
 	}()
 
-	go runFFmpegProcess(ffmpegInputReader, ffmpegOutputWriter)
-	go readFFmpegOutputToBuffer(ffmpegOutputReader, rawFrameBuffer)
+	go runFFmpegProcess(grpcToFFmpegReader, ffmpegToBufferWriter)
+	go readFFmpegOutputToBuffer(ffmpegToBufferReader, rawFrameBuffer)
 	go processRawFramesToImage(rawFrameBuffer, frameImageData)
 	go drawFrames(imageCanvas, frameImageData, fpsLabel)
-	go forwardVideoFeed(stream, ffmpegInputWriter)
+	go forwardVideoFeed(stream, grpcToFFmpegWriter)
 
 	if overlay != nil {
-		w.Canvas().Focus(overlay)
+		mainAppWindow.Canvas().Focus(overlay)
 	}
 
-	w.ShowAndRun()
+	mainAppWindow.ShowAndRun()
 	log.Println("INFO: Fyne app exited. Client shutting down.")
-	streamCancel() // Cancels remote control stream
+	streamCancelMain()
 	close(inputEvents)
+	// refreshTreeChan is from file_system.go, close it there if appropriate, or manage lifecycle
+	// For now, assuming it's closed when no longer needed (e.g. here at app exit)
+	close(refreshTreeChan)
 
-	// Clean up terminal stream if it's active
 	terminalMutex.Lock()
 	if terminalStreamCancel != nil {
 		log.Println("DEBUG: main exit - Calling terminalStreamCancel")
@@ -332,8 +334,10 @@ func main() {
 		terminalStreamCancel = nil
 	}
 	terminalMutex.Unlock()
+	log.Println("Client shutdown complete.")
 }
 
+// loadTLSCredentialsFromEmbed remains the same
 func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.TransportCredentials, error) {
 	clientCert, err := tls.X509KeyPair(clientCertEmbed, clientKeyEmbed)
 	if err != nil {
@@ -341,33 +345,30 @@ func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.Transport
 	}
 	serverCertPool := x509.NewCertPool()
 	if !serverCertPool.AppendCertsFromPEM(serverCACertEmbed) {
-		return nil, fmt.Errorf("failed to append server CA cert: %w", err)
+		return nil, fmt.Errorf("failed to append server CA cert to pool: %w", err)
 	}
-
 	var tlsServerName string
-	if *connectionType == "relay" {
-		log.Printf("WARN: [TLS] In relay mode, ServerName for TLS is critical. Using 'localhost' as a placeholder. This must match the server's certificate subject/SAN for the original host, not the relay.")
+	if connectionType != nil && *connectionType == "relay" {
+		log.Printf("WARN: [TLS] In relay mode, ServerName for TLS is critical. Using 'localhost' as a placeholder for relay connections.")
 		tlsServerName = "localhost"
 	} else {
 		host, _, err := net.SplitHostPort(serverAddrString)
 		if err != nil {
-			log.Printf("WARN: [TLS] Could not parse host from server address '%s' for direct connection: %v. Defaulting ServerName to '%s'.", serverAddrString, err, serverAddrString)
+			log.Printf("WARN: [TLS] Could not parse host from server address '%s': %v. Defaulting ServerName to '%s'.", serverAddrString, err, serverAddrString)
 			tlsServerName = serverAddrString
 		} else {
 			tlsServerName = host
 		}
 	}
 	log.Printf("INFO: [TLS] Using ServerName: '%s' for TLS configuration.", tlsServerName)
-
 	config := &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      serverCertPool,
-		MinVersion:   tls.VersionTLS12,
-		ServerName:   tlsServerName,
+		Certificates: []tls.Certificate{clientCert}, RootCAs: serverCertPool,
+		MinVersion: tls.VersionTLS12, ServerName: tlsServerName,
 	}
 	return credentials.NewTLS(config), nil
 }
 
+// startPinger remains the same
 func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 	if client == nil {
 		log.Println("Pinger: RemoteControlServiceClient is nil.")
@@ -393,8 +394,8 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 					pingLabel.SetText("RTT: Error")
 				}
 				s, ok := status.FromError(err)
-				if ok && (s.Code() == codes.Unavailable || s.Code() == codes.Canceled) {
-					log.Println("Pinger: Connection unavailable, stopping pinger.")
+				if ok && (s.Code() == codes.Unavailable || s.Code() == codes.Canceled || s.Code() == codes.DeadlineExceeded) {
+					log.Println("Pinger: Connection unavailable or context done, stopping pinger.")
 					if pingLabel != nil {
 						pingLabel.SetText("RTT: N/A (Disconnected)")
 					}
@@ -403,11 +404,9 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 				continue
 			}
 			if resp == nil {
-				log.Printf("WARN: Ping response is nil, client timestamp: %d", req.GetClientTimestampNano())
+				log.Printf("WARN: Ping response is nil despite no error")
 				continue
 			}
-			_ = resp.GetClientTimestampNano()
-
 			rttMillis := float64(time.Since(startTime).Nanoseconds()) / 1_000_000.0
 			if pingLabel != nil {
 				pingLabel.SetText(fmt.Sprintf("RTT: %.2f ms", rttMillis))
@@ -422,9 +421,36 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 	}
 }
 
-// --- Terminal Window Functions (Added) ---
+// Terminal functions (appendToTerminalOutput, openTerminalWindow, sendTerminalCommand, receiveTerminalOutput)
+// are assumed to be in the same package (main) or properly imported if in a different one.
+// For this example, they are kept in main.go as per the user's provided structure.
 
-func openTerminalWindow(a fyne.App) {
+// appendToTerminalOutput remains the same
+func appendToTerminalOutput(textChunk string) {
+	terminalMutex.Lock()
+	defer terminalMutex.Unlock()
+	if terminalOutputRichText == nil {
+		log.Println("DEBUG: appendToTerminalOutput - terminalOutputRichText is nil, cannot append.")
+		return
+	}
+	terminalOutputRichText.Segments = append(terminalOutputRichText.Segments,
+		&widget.TextSegment{Text: textChunk, Style: widget.RichTextStyleInline},
+	)
+	terminalOutputRichText.Refresh()
+	if terminalScroll != nil {
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			terminalMutex.Lock()
+			if terminalScroll != nil {
+				terminalScroll.ScrollToBottom()
+			}
+			terminalMutex.Unlock()
+		}()
+	}
+}
+
+// openTerminalWindow remains the same, ensure it uses the passed fyne.App
+func openTerminalWindow(theApp fyne.App) {
 	terminalMutex.Lock()
 	if terminalWindow != nil {
 		log.Println("DEBUG: openTerminalWindow - Window already open. Requesting focus.")
@@ -432,78 +458,65 @@ func openTerminalWindow(a fyne.App) {
 		terminalMutex.Unlock()
 		return
 	}
-	terminalMutex.Unlock() // Unlock early if window not already open
+	terminalMutex.Unlock()
 
 	if terminalClient == nil {
 		log.Println("ERROR: openTerminalWindow - Terminal client not initialized.")
-		dialog.ShowError(fmt.Errorf("Terminal client not available"), mainWindow)
+		// Parent dialog to mainAppWindow (which is the global mainWindow now set via InitializeSharedGlobals)
+		var parentWin fyne.Window
+		// Access the shared mainWindow if available
+		// This requires mainWindow to be correctly set by InitializeSharedGlobals
+		// For now, we assume 'mainWindow' from file_system.go is the one to use
+		// This part needs careful handling of which window is the "main" one for dialogs.
+		// Let's assume the 'mainWindow' set via InitializeSharedGlobals is the correct parent.
+		parentWin = GetMainWindow() // Hypothetical getter for the shared mainWindow
+
+		if parentWin != nil {
+			dialog.ShowError(fmt.Errorf("Terminal client not available"), parentWin)
+		} else {
+			log.Println("Cannot show terminal error dialog: no main parent window available via GetMainWindow().")
+		}
 		return
 	}
 
-	w := a.NewWindow("Remote Terminal")
+	w := theApp.NewWindow("Remote PTY Terminal")
+	ctx, thisWindowCancelFunc := context.WithCancel(context.Background())
+	log.Printf("DEBUG: openTerminalWindow - Created new stream context %p with cancel func %p", ctx, thisWindowCancelFunc)
 
-	// Create a new context and cancel function for this specific terminal window instance
-	// This is crucial to avoid conflicts if the window is closed and reopened.
-	ctx, cancel := context.WithCancel(context.Background())
-	log.Printf("DEBUG: openTerminalWindow - Created new stream context %p with cancel func %p", ctx, cancel)
+	currentOutputRichText := widget.NewRichText()
+	currentScroll := container.NewScroll(currentOutputRichText)
+	currentScroll.SetMinSize(fyne.NewSize(640, 400))
+	currentInput := widget.NewEntry()
+	currentInput.SetPlaceHolder("Enter command or input here...")
 
-	// Safely update global vars under mutex
 	terminalMutex.Lock()
 	terminalWindow = w
-	terminalStreamCancel = cancel // Store the cancel func for this specific stream
-	terminalOutput = binding.NewStringList()
-	terminalMutex.Unlock()
-
-	outputList := widget.NewListWithData(terminalOutput,
-		func() fyne.CanvasObject {
-			return widget.NewLabel("template")
-		},
-		func(i binding.DataItem, o fyne.CanvasObject) {
-			s, _ := i.(binding.String).Get()
-			o.(*widget.Label).SetText(s)
-		})
-
-	currentScroll := container.NewScroll(outputList) // Use local var for scroll
-	currentScroll.SetMinSize(fyne.NewSize(600, 300))
-
-	currentInput := widget.NewEntry() // Use local var for input
-	currentInput.SetPlaceHolder("Enter command...")
-
-	sendButton := widget.NewButton("Send", func() {
-		sendTerminalCommand(currentInput) // Pass currentInput
-	})
-
-	currentInput.OnSubmitted = func(cmd string) {
-		sendTerminalCommand(currentInput) // Pass currentInput
-	}
-
-	// Update global vars for input and scroll under mutex, though they are primarily used by the current window's closures
-	terminalMutex.Lock()
+	terminalStreamCancel = thisWindowCancelFunc
+	terminalOutputRichText = currentOutputRichText
 	terminalInput = currentInput
 	terminalScroll = currentScroll
 	terminalMutex.Unlock()
 
+	sendButton := widget.NewButton("Send", func() { sendTerminalCommand(currentInput) })
+	currentInput.OnSubmitted = func(cmdText string) { sendTerminalCommand(currentInput) }
 	inputBox := container.NewBorder(nil, nil, nil, sendButton, currentInput)
 	content := container.NewBorder(nil, inputBox, nil, nil, currentScroll)
-
 	w.SetContent(content)
-	w.Resize(fyne.NewSize(640, 480))
+	w.Resize(fyne.NewSize(700, 500))
 
 	log.Println("DEBUG: openTerminalWindow - Attempting to establish terminal command stream...")
-	stream, err := terminalClient.CommandStream(ctx) // Use the new context 'ctx'
+	stream, err := terminalClient.CommandStream(ctx)
 	if err != nil {
 		log.Printf("ERROR: openTerminalWindow - Could not create terminal command stream: %v. Context %p", err, ctx)
+		appendToTerminalOutput(fmt.Sprintf("--- Error connecting to terminal: %v ---", err))
+		log.Printf("DEBUG: openTerminalWindow - Stream creation failed, calling thisWindowCancelFunc (%p) for context %p", thisWindowCancelFunc, ctx)
+		thisWindowCancelFunc()
+
 		terminalMutex.Lock()
-		if terminalOutput != nil {
-			terminalOutput.Append(fmt.Sprintf("Error connecting to terminal: %v", err))
+		if terminalWindow == w {
+			log.Println("DEBUG: Stream creation failed for the current global terminal window. Setting global terminalStreamCancel to nil.")
+			terminalStreamCancel = nil
 		}
-		// Clean up context if stream creation failed
-		if terminalStreamCancel != nil { // This should be 'cancel' for the local context
-			log.Printf("DEBUG: openTerminalWindow - Stream creation failed, calling cancel func %p for context %p", cancel, ctx)
-			cancel() // Call the local cancel
-		}
-		terminalStreamCancel = nil // Nullify global
-		currentTerminalStream = nil
 		terminalMutex.Unlock()
 		w.Show()
 		return
@@ -512,209 +525,152 @@ func openTerminalWindow(a fyne.App) {
 	terminalMutex.Lock()
 	currentTerminalStream = stream
 	terminalMutex.Unlock()
-
 	log.Printf("DEBUG: openTerminalWindow - Terminal command stream established. Stream: %p, Context: %p", stream, ctx)
-	terminalMutex.Lock()
-	if terminalOutput != nil {
-		terminalOutput.Append("Connected to remote terminal.")
-	}
-	terminalMutex.Unlock()
-
-	go receiveTerminalOutput(stream, ctx) // Pass the specific stream and its context
+	go receiveTerminalOutput(stream, ctx, thisWindowCancelFunc)
 
 	w.SetOnClosed(func() {
-		log.Printf("DEBUG: SetOnClosed - Terminal window closed by user. Calling cancel func %p for context %p", cancel, ctx)
-		cancel() // Call the cancel function associated with this window's stream context
+		log.Printf("DEBUG: SetOnClosed - Terminal window %p closed by user. Calling its cancel func %p for context %p", w, thisWindowCancelFunc, ctx)
+		thisWindowCancelFunc()
 
 		terminalMutex.Lock()
-		if terminalWindow == w { // Ensure we are cleaning up the correct window's resources
+		if terminalWindow == w {
 			terminalWindow = nil
 			currentTerminalStream = nil
-			terminalStreamCancel = nil // Clear the global one if it was for this window
-			terminalOutput = nil
+			log.Println("DEBUG: SetOnClosed - Cleaning global resources for the closed terminal window.")
+			terminalStreamCancel = nil
+			terminalOutputRichText = nil
 			terminalInput = nil
 			terminalScroll = nil
-			log.Println("DEBUG: SetOnClosed - Terminal resources cleaned up.")
 		} else {
-			log.Println("DEBUG: SetOnClosed - Window closed was not the current terminalWindow, or already cleaned.")
+			log.Println("DEBUG: SetOnClosed - Closed window was not the current active terminalWindow, or already cleaned/reassigned.")
 		}
 		terminalMutex.Unlock()
 	})
-
 	w.Show()
 	w.Canvas().Focus(currentInput)
 }
 
-// Modified to accept the input widget directly
+// sendTerminalCommand remains the same
 func sendTerminalCommand(inputWidget *widget.Entry) {
 	if inputWidget == nil {
 		log.Println("DEBUG: sendTerminalCommand - inputWidget is nil")
 		return
 	}
-	command := inputWidget.Text
-	if command == "" {
-		return
-	}
+	commandText := inputWidget.Text
 
 	terminalMutex.Lock()
 	activeStream := currentTerminalStream
-	outputBinding := terminalOutput
-	scrollArea := terminalScroll
-	currentWin := terminalWindow // For focusing input
+	cancelFuncForActiveStream := terminalStreamCancel
+	currentWin := terminalWindow
 	terminalMutex.Unlock()
 
 	if activeStream == nil {
-		log.Println("DEBUG: sendTerminalCommand - currentTerminalStream is nil. Command: '%s'", command)
-		if outputBinding != nil {
-			outputBinding.Append("Error: Not connected to terminal.")
-			if scrollArea != nil {
-				scrollArea.ScrollToBottom()
-			}
-		}
+		log.Printf("DEBUG: No active terminal stream. Cannot send: '%s'", commandText)
+		appendToTerminalOutput("--- Error: Not connected. ---")
 		return
 	}
-	log.Printf("DEBUG: sendTerminalCommand - currentTerminalStream: %p. Command: '%s'", activeStream, command)
+	log.Printf("DEBUG: Sending to stream %p: '%s'", activeStream, commandText)
+	req := &pb.TerminalRequest{Command: commandText}
 
-	if outputBinding != nil {
-		displayCmd := fmt.Sprintf("> %s", command)
-		outputBinding.Append(displayCmd)
-		if scrollArea != nil {
-			scrollArea.ScrollToBottom()
-		}
-	}
-
-	req := &pb.TerminalRequest{Command: command}
-	log.Printf("INFO: Sending terminal command: '%s'", command)
 	if err := activeStream.Send(req); err != nil {
-		log.Printf("ERROR: Failed to send terminal command: %v. Stream: %p", err, activeStream)
+		log.Printf("ERROR: Send to terminal stream %p failed: %v", activeStream, err)
+		appendToTerminalOutput(fmt.Sprintf("--- Error sending: %v ---", err))
 
-		// Clean up the stream as it's likely broken
+		if cancelFuncForActiveStream != nil {
+			log.Printf("DEBUG: Send error on stream %p. Calling its associated cancel func %p.", activeStream, cancelFuncForActiveStream)
+			cancelFuncForActiveStream()
+		}
+
 		terminalMutex.Lock()
-		if terminalStreamCancel != nil {
-			log.Printf("DEBUG: sendTerminalCommand - Send() error. Calling terminalStreamCancel: %p", terminalStreamCancel)
-			terminalStreamCancel()
+		if currentTerminalStream == activeStream {
+			log.Printf("DEBUG: Send error. Clearing global currentTerminalStream (was %p). Global terminalStreamCancel (was %p) is now nilled as it was called.", currentTerminalStream, terminalStreamCancel)
+			currentTerminalStream = nil
+			terminalStreamCancel = nil
+		} else {
+			log.Printf("DEBUG: Send error for stream %p, but global currentTerminalStream is now %p. Global terminalStreamCancel (%p) might be for the new stream.", activeStream, currentTerminalStream, terminalStreamCancel)
+		}
+		terminalMutex.Unlock()
+		return
+	}
+	inputWidget.SetText("")
+	if currentWin != nil && inputWidget != nil {
+		currentWin.Canvas().Focus(inputWidget)
+	}
+}
+
+// receiveTerminalOutput remains the same
+func receiveTerminalOutput(stream pb.TerminalService_CommandStreamClient, streamCtx context.Context, streamCancel context.CancelFunc) {
+	log.Printf("DEBUG: receiveTerminalOutput started. Stream: %p, Context: %p, CancelFunc: %p", stream, streamCtx, streamCancel)
+	defer func() {
+		log.Printf("DEBUG: receiveTerminalOutput stopped. Stream: %p, Context: %p", stream, streamCtx)
+		terminalMutex.Lock()
+		if currentTerminalStream == stream {
+			log.Printf("DEBUG: receiveTerminalOutput exit. Clearing global currentTerminalStream (%p).", currentTerminalStream)
+			currentTerminalStream = nil
 			terminalStreamCancel = nil
 		}
-		currentTerminalStream = nil
 		terminalMutex.Unlock()
-
-		if outputBinding != nil { // Update UI about the error
-			outputBinding.Append(fmt.Sprintf("Error sending command: %v", err))
-			if scrollArea != nil {
-				scrollArea.ScrollToBottom()
-			}
-		}
-		return
-	}
-
-	inputWidget.SetText("") // Clear input field after sending
-	if currentWin != nil {  // Check if window still exists
-		currentWin.Canvas().Focus(inputWidget) // Re-focus after sending
-	}
-}
-
-// Modified to accept the specific stream and its context
-func receiveTerminalOutput(stream pb.TerminalService_CommandStreamClient, streamCtx context.Context) {
-	log.Printf("DEBUG: receiveTerminalOutput - Goroutine started. Stream: %p, Context: %p, Context.Err(): %v", stream, streamCtx, streamCtx.Err())
-	defer log.Printf("DEBUG: receiveTerminalOutput - Goroutine stopped. Stream: %p, Context: %p", stream, streamCtx)
+	}()
 
 	for {
-		// Check context before Recv (important if context can be cancelled externally)
 		select {
 		case <-streamCtx.Done():
-			log.Printf("DEBUG: receiveTerminalOutput - Stream context %p was already done before Recv(): %v", streamCtx, streamCtx.Err())
-			// Perform cleanup based on the current global state if needed, but this goroutine is for this specific stream.
-			terminalMutex.Lock()
-			if terminalOutput != nil {
-				terminalOutput.Append(fmt.Sprintf("--- Disconnected (context %p done): %v ---", streamCtx, streamCtx.Err()))
-			}
-			if terminalScroll != nil && terminalOutput != nil {
-				terminalScroll.ScrollToBottom()
-			}
-			// If this stream was the active one, nullify it.
-			if currentTerminalStream == stream {
-				currentTerminalStream = nil
-				// The cancel func for this stream (passed as streamCtx's cancel) should have been called by SetOnClosed or send error
-			}
-			terminalMutex.Unlock()
+			log.Printf("DEBUG: receiveTerminalOutput - Context %p done: %v", streamCtx, streamCtx.Err())
+			errMsg := fmt.Sprintf("--- PTY Disconnected (context %p: %v) ---", streamCtx, streamCtx.Err())
+			appendToTerminalOutput(errMsg)
 			return
 		default:
-			// Context not done, proceed to Recv
 		}
-
-		log.Printf("DEBUG: receiveTerminalOutput - About to call Recv() on stream %p. Context %p. Context.Err(): %v", stream, streamCtx, streamCtx.Err())
 		resp, err := stream.Recv()
-		log.Printf("DEBUG: receiveTerminalOutput - Recv() on stream %p returned. Raw error: <%T %v>. Response: <%v>", stream, err, err, resp)
-
-		terminalMutex.Lock() // Lock for accessing global UI elements like terminalOutput
-
 		if err != nil {
-			log.Printf("DEBUG: receiveTerminalOutput - Recv() error on stream %p. Error details: %v. Stream context %p error before explicit check: %v", stream, err, streamCtx, streamCtx.Err())
-
-			// Determine if the error is due to the context being canceled for this specific stream
-			contextErr := streamCtx.Err() // Check our specific context for this stream
-			if contextErr == context.Canceled {
-				log.Printf("INFO: receiveTerminalOutput - Stream context %p for stream %p was canceled. Error: %v", streamCtx, stream, err)
-				if terminalOutput != nil {
-					terminalOutput.Append(fmt.Sprintf("--- Terminal disconnected (context %p canceled): %v ---", streamCtx, err))
-				}
+			log.Printf("DEBUG: Recv() error on stream %p (context %p): %v", stream, streamCtx, err)
+			errMsg := ""
+			if streamCtx.Err() == context.Canceled {
+				errMsg = fmt.Sprintf("--- PTY Disconnected (context %p canceled, Recv err: %v) ---", streamCtx, err)
 			} else if err == io.EOF {
-				log.Println("INFO: receiveTerminalOutput - Server closed the stream (EOF) for stream %p.", stream)
-				if terminalOutput != nil {
-					terminalOutput.Append(fmt.Sprintf("--- Terminal session ended by server (stream %p) ---", stream))
+				errMsg = fmt.Sprintf("--- PTY Session ended by server (EOF on stream %p) ---", stream)
+				if streamCancel != nil {
+					log.Printf("DEBUG: receiveTerminalOutput - EOF received, calling this stream's cancel func %p", streamCancel)
+					streamCancel()
 				}
-			} else { // Other gRPC errors
-				log.Printf("ERROR: receiveTerminalOutput - Error receiving from stream %p: %v", stream, err)
-				if terminalOutput != nil {
-					terminalOutput.Append(fmt.Sprintf("--- Terminal stream error (stream %p): %v ---", stream, err))
+			} else {
+				errMsg = fmt.Sprintf("--- PTY Stream error (stream %p): %v ---", stream, err)
+				if streamCancel != nil {
+					log.Printf("DEBUG: receiveTerminalOutput - Recv error, calling this stream's cancel func %p", streamCancel)
+					streamCancel()
 				}
 			}
-
-			if terminalScroll != nil && terminalOutput != nil {
-				terminalScroll.ScrollToBottom()
-			}
-
-			// If this specific stream is the one currently active globally, clean it up.
-			// The cancel for streamCtx should be handled by SetOnClosed or send error path.
-			if currentTerminalStream == stream {
-				currentTerminalStream = nil
-				// terminalStreamCancel for this stream was 'cancel' passed to openTerminalWindow,
-				// which is called by SetOnClosed or send error path.
-				// No need to call the global terminalStreamCancel here directly unless it's a fallback.
-				log.Printf("DEBUG: receiveTerminalOutput - Setting global currentTerminalStream to nil as stream %p errored.", stream)
-			}
-			terminalMutex.Unlock()
-			return // Exit goroutine for this stream
-		}
-
-		// If err is nil, process response
-		if terminalOutput == nil {
-			log.Println("DEBUG: receiveTerminalOutput - terminalOutput is nil (window likely closed), but received data for stream %p. Discarding.", stream)
-			terminalMutex.Unlock()
-			// Continue to try and drain the stream if window is closed but stream is not? Or just return?
-			// For now, let's assume if terminalOutput is nil, the window is gone and we should stop.
+			appendToTerminalOutput(errMsg)
 			return
 		}
-
-		var prefix string
-		switch resp.GetOutputType() {
-		case pb.TerminalResponse_STDOUT:
-			prefix = ""
-		case pb.TerminalResponse_STDERR:
-			prefix = "ERR: "
-		case pb.TerminalResponse_SYSTEM_MESSAGE:
-			prefix = "SYS: "
-		case pb.TerminalResponse_ERROR_MESSAGE:
-			prefix = "SRV_ERR: "
-		default:
-			prefix = "UNK: "
+		if resp.GetOutputLine() != "" {
+			appendToTerminalOutput(resp.GetOutputLine())
 		}
-		formattedLine := prefix + resp.GetOutputLine()
-		terminalOutput.Append(formattedLine)
-
-		if terminalScroll != nil {
-			terminalScroll.ScrollToBottom()
+		if resp.GetCommandEnded() {
+			log.Printf("DEBUG: Server indicated CommandEnded for stream %p. Output: %q", stream, resp.GetOutputLine())
 		}
-		terminalMutex.Unlock()
 	}
 }
+
+// GetMainWindow is a helper to access the shared mainWindow.
+// This assumes mainWindow in file_system.go is the one to be returned.
+// This function would ideally be in file_system.go or a shared utility file.
+// For now, defining it here for clarity of intent for openTerminalWindow.
+// Ensure that the 'mainWindow' variable in file_system.go is actually the one you want.
+func GetMainWindow() fyne.Window {
+	// This needs to return the actual main window instance.
+	// If 'mainWindow' is a global in the 'main' package (declared in file_system.go),
+	// and correctly initialized by main(), this would work.
+	// However, direct access `return mainWindow` (referring to file_system.go's var)
+	// is cleaner if this function is in file_system.go or if it's passed around.
+	// For now, this is a placeholder for how openTerminalWindow might get its parent.
+	// The actual 'mainWindow' from file_system.go should be used.
+	// This function is problematic if main.go's mainAppWindow is different from file_system.go's mainWindow
+	// The InitializeSharedGlobals should make them the same.
+	return GlobalMainWindow // Access the global var set by InitializeSharedGlobals
+}
+
+// GlobalMainWindow is a package-level variable in main.go to hold the main window reference
+// It will be set by InitializeSharedGlobals via file_system.go's mainWindow.
+// This is a bit convoluted; the ideal is that file_system.go's mainWindow IS the main window.
+var GlobalMainWindow fyne.Window

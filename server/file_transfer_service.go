@@ -10,10 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 
+	pb "control_grpc/gen/proto" // Assuming this path is correct
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	pb "control_grpc/gen/proto" // Assuming this path is correct
 )
 
 // GetFS handles requests to list directory contents or filesystem roots.
@@ -51,14 +50,12 @@ func (s *server) GetFS(ctx context.Context, req *pb.FSRequest) (*pb.FSResponse, 
 			} else {
 				response.ErrorMessage = fmt.Sprintf("Cannot access '%s': %v", filepath.Base(reqPath), err)
 			}
-			// It's common to return an empty node list with an error message,
-			// or a specific gRPC error code. Here, we use ErrorMessage.
 		}
 	}
 
 	response.Nodes = nodes
 	log.Printf("GetFS response for '%s': sending %d nodes, ErrorMessage: '%s'", reqPath, len(response.Nodes), response.ErrorMessage)
-	return response, nil // Return nil error for the RPC itself; client checks ErrorMessage
+	return response, nil
 }
 
 // DownloadFile handles requests to stream a single file's content.
@@ -66,7 +63,6 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 	filePath := req.GetPath()
 	log.Printf("DownloadFile request received for path: '%s'", filePath)
 
-	// Validate that the path is a file and not a directory
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		log.Printf("Error stating file '%s': %v", filePath, err)
@@ -91,9 +87,10 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 	defer file.Close()
 
 	buffer := make([]byte, 1024*64) // 64KB chunk size
-	log.Printf("Starting stream for file: '%s'", filePath)
+	firstChunkSent := false
+	log.Printf("Starting stream for file: '%s', Total size: %d bytes", filePath, fileInfo.Size())
+
 	for {
-		// Check for client cancellation
 		if err := stream.Context().Err(); err != nil {
 			log.Printf("Client cancelled download of '%s': %v", filePath, err)
 			return status.FromContextError(err).Err()
@@ -103,20 +100,29 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 		if err != nil {
 			if err == io.EOF {
 				log.Printf("Finished streaming file: '%s'", filePath)
-				break // End of file
+				break
 			}
 			log.Printf("Error reading file chunk for '%s': %v", filePath, err)
 			return status.Errorf(codes.Internal, "Error reading file chunk: %v", err)
 		}
 
-		// Send the chunk
-		sendErr := stream.Send(&pb.FileChunk{Content: buffer[:n]})
+		chunkToSend := &pb.FileChunk{Content: buffer[:n]}
+
+		if !firstChunkSent {
+			// Send metadata with the first chunk
+			chunkToSend.Metadata = &pb.FileChunkMetadata{
+				TotalSize: fileInfo.Size(),
+			}
+			log.Printf("Sending first chunk for '%s' with metadata (TotalSize: %d)", filePath, fileInfo.Size())
+			firstChunkSent = true
+		}
+
+		sendErr := stream.Send(chunkToSend)
 		if sendErr != nil {
 			log.Printf("Error sending file chunk for '%s': %v", filePath, sendErr)
-			// Check if the error is due to client cancellation
 			if status.Code(sendErr) == codes.Canceled || status.Code(sendErr) == codes.Unavailable {
 				log.Printf("Client cancelled or stream unavailable during send for '%s'", filePath)
-				return sendErr // Propagate cancellation/unavailability
+				return sendErr
 			}
 			return status.Errorf(codes.Internal, "Error sending file chunk: %v", sendErr)
 		}
@@ -143,81 +149,73 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 		return status.Errorf(codes.InvalidArgument, "Path is not a directory.")
 	}
 
-	// Use a pipe to stream zip data without creating a temp file on disk.
 	pipeReader, pipeWriter := io.Pipe()
+	firstChunkSent := false // To send metadata with the first data chunk
 
-	// Goroutine to write zip data to the pipe.
 	go func() {
-		defer pipeWriter.Close() // Close writer when zipping is done or fails.
+		defer pipeWriter.Close()
 		zipWriter := zip.NewWriter(pipeWriter)
-		defer zipWriter.Close() // Ensure zip writer is closed.
+		defer zipWriter.Close()
 
 		log.Printf("Starting zipping process for folder: '%s'", folderPath)
 		walkErr := filepath.Walk(folderPath, func(path string, info os.FileInfo, err error) error {
-			// Check for context cancellation (client disconnected)
 			select {
 			case <-stream.Context().Done():
 				log.Printf("Context cancelled during folder zipping for '%s': %v", folderPath, stream.Context().Err())
-				return stream.Context().Err() // Stop walk if client cancelled
+				return stream.Context().Err()
 			default:
 			}
 
 			if err != nil {
 				log.Printf("Error accessing path '%s' during walk: %v. Skipping.", path, err)
 				if os.IsPermission(err) {
-					return nil // Skip permission denied files/folders
+					return nil
 				}
-				return err // Propagate other errors to stop the walk
+				return err
 			}
 
-			// Create a relative path for the entry in the zip archive
 			relPath, err := filepath.Rel(folderPath, path)
 			if err != nil {
 				log.Printf("Error getting relative path for '%s' (base '%s'): %v. Skipping.", path, folderPath, err)
-				return nil // Skip if relative path cannot be determined
+				return nil
 			}
-
-			// Skip the root folder itself if relPath is "."
 			if relPath == "." {
 				return nil
 			}
 
-			// Create zip header from file info
 			header, err := zip.FileInfoHeader(info)
 			if err != nil {
 				log.Printf("Error creating zip header for '%s': %v. Skipping.", path, err)
 				return nil
 			}
-			header.Name = filepath.ToSlash(relPath) // Use forward slashes for zip paths
-
+			header.Name = filepath.ToSlash(relPath)
 			if info.IsDir() {
-				header.Name += "/" // Add trailing slash for directories
-				// Directories are typically stored without compression or explicit content
+				header.Name += "/"
 				header.Method = zip.Store
 			} else {
-				header.Method = zip.Deflate // Use Deflate compression for files
+				header.Method = zip.Deflate
 			}
 
 			entryWriter, err := zipWriter.CreateHeader(header)
 			if err != nil {
 				log.Printf("Error creating zip entry for '%s': %v.", path, err)
-				return err // Stop zipping on critical error
+				return err
 			}
 
 			if !info.IsDir() {
-				file, err := os.Open(path)
-				if err != nil {
-					log.Printf("Error opening file '%s' for zipping: %v. Skipping.", path, err)
-					if os.IsPermission(err) {
-						return nil // Skip file if permission denied
+				file, errOpen := os.Open(path)
+				if errOpen != nil {
+					log.Printf("Error opening file '%s' for zipping: %v. Skipping.", path, errOpen)
+					if os.IsPermission(errOpen) {
+						return nil
 					}
-					return err // Propagate other open errors
+					return errOpen
 				}
-				defer file.Close()
-				_, err = io.Copy(entryWriter, file)
-				if err != nil {
-					log.Printf("Error copying file content for '%s' to zip: %v.", path, err)
-					return err // Stop zipping on copy error
+				defer file.Close() // Close file after copying
+				_, errCopy := io.Copy(entryWriter, file)
+				if errCopy != nil {
+					log.Printf("Error copying file content for '%s' to zip: %v.", path, errCopy)
+					return errCopy
 				}
 			}
 			return nil
@@ -225,9 +223,6 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 
 		if walkErr != nil {
 			log.Printf("Directory walk or zipping failed for '%s': %v", folderPath, walkErr)
-			// Error is propagated to pipeWriter, which will cause pipeReader.Read to error.
-			// The pipeWriter.Close() in defer will still be called.
-			// If walkErr is context.Canceled, it means client disconnected.
 			if walkErr == context.Canceled || walkErr == stream.Context().Err() {
 				log.Printf("Zipping cancelled for '%s' due to client disconnect.", folderPath)
 			}
@@ -236,14 +231,13 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 		}
 	}()
 
-	// Stream the zip data from the pipe reader to the gRPC stream.
 	buffer := make([]byte, 1024*64) // 64KB chunk size
 	log.Printf("Starting stream of zip data for folder: '%s'", folderPath)
+
 	for {
-		// Check for client cancellation before reading from pipe
 		if err := stream.Context().Err(); err != nil {
 			log.Printf("Client cancelled download of zip for '%s': %v", folderPath, err)
-			pipeReader.CloseWithError(err) // Signal the zipping goroutine to stop
+			pipeReader.CloseWithError(err)
 			return status.FromContextError(err).Err()
 		}
 
@@ -251,17 +245,29 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 		if err != nil {
 			if err == io.EOF {
 				log.Printf("Finished streaming zip data for folder: '%s' (EOF from pipe).", folderPath)
-				break // End of pipe means zipping is complete or failed and pipe closed
+				break
 			}
 			log.Printf("Error reading from zip pipe for '%s': %v", folderPath, err)
-			// This error could be from the zipping goroutine (e.g., file system error)
 			return status.Errorf(codes.Internal, "Error reading zip data: %v", err)
 		}
 
-		sendErr := stream.Send(&pb.FileChunk{Content: buffer[:n]})
+		chunkToSend := &pb.FileChunk{Content: buffer[:n]}
+
+		if !firstChunkSent {
+			// For zipped folders, the total size is not easily known beforehand without
+			// zipping to a temp file first. We send TotalSize = 0, and the client
+			// progress bar will remain indeterminate.
+			chunkToSend.Metadata = &pb.FileChunkMetadata{
+				TotalSize: 0, // Indicates unknown total size for client
+			}
+			log.Printf("Sending first chunk for zipped folder '%s' with metadata (TotalSize: 0 - indeterminate)", folderPath)
+			firstChunkSent = true
+		}
+
+		sendErr := stream.Send(chunkToSend)
 		if sendErr != nil {
 			log.Printf("Error sending zip chunk for '%s': %v", folderPath, sendErr)
-			pipeReader.CloseWithError(sendErr) // Signal zipping goroutine if send fails
+			pipeReader.CloseWithError(sendErr)
 			if status.Code(sendErr) == codes.Canceled || status.Code(sendErr) == codes.Unavailable {
 				return sendErr
 			}
@@ -281,7 +287,6 @@ func getWindowsDrives() []*pb.FSNode {
 		fileInfo, err := os.Stat(path)
 		if err == nil && fileInfo.IsDir() {
 			log.Printf("Found accessible drive: %s", path)
-			// Check if drive has children (can be slow, consider omitting or making it a quick check)
 			hasChildren := false
 			entries, readErr := os.ReadDir(path)
 			if readErr == nil {
@@ -292,9 +297,10 @@ func getWindowsDrives() []*pb.FSNode {
 
 			drives = append(drives, &pb.FSNode{
 				Path:        path,
+				Name:        path, // For drives, path and name are the same
 				Type:        pb.FSNode_FOLDER,
-				HasChildren: hasChildren, // Indicates if the drive is not empty and readable
-				Size:        0,           // Size isn't typically relevant for a drive letter itself
+				HasChildren: hasChildren,
+				Size:        0,
 			})
 		}
 	}
@@ -304,7 +310,7 @@ func getWindowsDrives() []*pb.FSNode {
 	return drives
 }
 
-// getPosixRoot returns the root directory node for POSIX-like systems (Linux, macOS).
+// getPosixRoot returns the root directory node for POSIX-like systems.
 func getPosixRoot() []*pb.FSNode {
 	log.Println("Returning POSIX root '/'")
 	hasChildren := false
@@ -317,51 +323,50 @@ func getPosixRoot() []*pb.FSNode {
 	return []*pb.FSNode{
 		{
 			Path:        "/",
+			Name:        "/", // For root, path and name are the same
 			Type:        pb.FSNode_FOLDER,
 			HasChildren: hasChildren,
-			Size:        0, // Size not relevant for root dir node
+			Size:        0,
 		},
 	}
 }
 
-// listDirectoryContents reads and returns nodes for files and subdirectories in a given path.
+// listDirectoryContents reads and returns nodes for files and subdirectories.
 func listDirectoryContents(dirPath string) ([]*pb.FSNode, error) {
 	log.Printf("Listing contents of directory: %s", dirPath)
 	var nodes []*pb.FSNode
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		// Error is returned to be handled by GetFS, which can put it in FSResponse.ErrorMessage
 		return nil, err
 	}
 
 	log.Printf("Found %d entries in %s", len(entries), dirPath)
 	for _, entry := range entries {
 		nodePath := filepath.Join(dirPath, entry.Name())
-		info, err := entry.Info() // os.DirEntry.Info() gets FileInfo
+		info, err := entry.Info()
 		if err != nil {
 			log.Printf("Could not get FileInfo for '%s': %v. Skipping.", nodePath, err)
-			continue // Skip if we can't get info (e.g., broken symlink, permissions)
+			continue
 		}
 
 		node := &pb.FSNode{
 			Path: nodePath,
-			Size: info.Size(), // File size
+			Name: entry.Name(), // Use the entry's name
+			Size: info.Size(),
 		}
 
 		if entry.IsDir() {
 			node.Type = pb.FSNode_FOLDER
-			// Check if the subdirectory has children (is non-empty and readable)
-			// This can be resource-intensive. Consider if always true/false or a quicker check is better.
 			subEntries, subErr := os.ReadDir(node.Path)
 			if subErr != nil {
 				log.Printf("Error reading subdirectory '%s' for HasChildren check: %v. Assuming no accessible children.", node.Path, subErr)
-				node.HasChildren = false // Assume no children if cannot read
+				node.HasChildren = false
 			} else {
 				node.HasChildren = len(subEntries) > 0
 			}
 		} else {
 			node.Type = pb.FSNode_FILE
-			node.HasChildren = false // Files don't have children
+			node.HasChildren = false
 		}
 		nodes = append(nodes, node)
 	}

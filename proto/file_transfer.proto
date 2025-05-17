@@ -24,24 +24,34 @@ message FSNode {
     FOLDER = 0;
     FILE = 1;
   }
-  string path = 1; // Full path of the node
-  NodeType type = 2; // Type of the node (FOLDER or FILE)
-  bool has_children = 3; // Relevant for FOLDER type. True if directory is not empty.
-  int64 size = 4; // Add file size
+  string path = 1;        // Full path of the node
+  string name = 5;        // Name of the node (filename or folder name) - Added for clarity
+  NodeType type = 2;      // Type of the node (FOLDER or FILE)
+  bool has_children = 3;  // Relevant for FOLDER type. True if directory is not empty.
+  int64 size = 4;         // File size in bytes. For folders, this might be 0 or an estimate.
   // Consider adding modtime etc. later if needed
-  // int64 modified_time = 5; // e.g., Unix timestamp
+  // int64 modified_time = 6; // e.g., Unix timestamp
 }
 
 message FSResponse {
   string requested_path = 1; // Echo back the path this response is for
   repeated FSNode nodes = 2; // List of nodes found at the path
-  string error_message = 3; // For reporting errors like "Access Denied"
+  string error_message = 3;  // For reporting errors like "Access Denied"
 }
 
 message FileRequest {
   string path = 1; // Path of the file or folder to download
 }
 
+// New message for metadata, sent potentially with the first chunk
+message FileChunkMetadata {
+  int64 total_size = 1; // Total size of the file being transferred.
+  // string file_name = 2; // Optional: if the name differs or for confirmation
+}
+
 message FileChunk {
-  bytes content = 1; // Chunk of file or zip data
+  // Optional: Sent by server in the first chunk if total_size is known and differs
+  // from FSNode.size or if FSNode.size was an estimate (e.g. for zipped folders).
+  FileChunkMetadata metadata = 1;
+  bytes content = 2; // Chunk of file or zip data
 }
