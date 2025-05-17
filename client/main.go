@@ -29,6 +29,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "control_grpc/gen/proto"
+
+	// Import for the fynex-widgets EntryEx (assuming package name is 'wx')
+	"github.com/matwachich/fynex-widgets"
 )
 
 //go:embed client.crt
@@ -40,34 +43,26 @@ var clientKeyEmbed []byte
 //go:embed server.crt
 var serverCACertEmbed []byte
 
-// Note: AppInstance, mainWindow, filesClient, refreshTreeChan etc. are now primarily managed
-// as package-level variables in file_system.go and initialized via InitializeSharedGlobals.
-// Local declarations in main.go are for variables specific to main's scope.
-
 var (
-	// These are specific to main.go or passed to other packages
 	inputEvents         = make(chan *pb.FeedRequest, 120)
 	pingLabel           *widget.Label
 	fpsLabel            *widget.Label
 	remoteControlClient pb.RemoteControlServiceClient
-	terminalClient      pb.TerminalServiceClient // Keep this as it's used to init terminal features
+	terminalClient      pb.TerminalServiceClient
 
-	// Terminal related globals (specific to terminal window management, might stay in main or move)
-	terminalWindow         fyne.Window
-	currentTerminalStream  pb.TerminalService_CommandStreamClient
-	terminalStreamCancel   context.CancelFunc
-	terminalOutputRichText *widget.RichText
-	terminalInput          *widget.Entry
-	terminalScroll         *container.Scroll
-	terminalMutex          sync.Mutex
+	terminalWindow        fyne.Window
+	currentTerminalStream pb.TerminalService_CommandStreamClient
+	terminalStreamCancel  context.CancelFunc
+	terminalOutputDisplay *wx.EntryEx // Using EntryEx from fynex-widgets/wx
+	terminalInput         *widget.Entry
+	terminalScroll        *container.Scroll
+	terminalMutex         sync.Mutex
 
-	// Command line flags
 	serverAddrActual *string
 	connectionType   *string
 	sessionToken     *string
 )
 
-// customRelayDialer remains the same
 func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Conn, error) {
 	log.Printf("INFO: [Relay Dialer] Attempting to dial relay data address: %s", targetRelayDataAddr)
 	dialer := &net.Dialer{}
@@ -95,7 +90,6 @@ func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Con
 	return conn, nil
 }
 
-// sendKeyboardEvent remains the same
 func sendKeyboardEvent(eventType, keyName, keyChar string) {
 	req := &pb.FeedRequest{
 		Message:           "keyboard_event",
@@ -126,8 +120,7 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Initialize Fyne app WITH A UNIQUE ID
-	currentFyneApp := app.NewWithID("com.example.controlgrpcclient.v2") // Use your unique ID
+	currentFyneApp := app.NewWithID("com.example.controlgrpcclient.v5") // Use your unique ID
 	mainAppWindow := currentFyneApp.NewWindow("Control GRPC client")
 
 	normalSize := fyne.NewSize(1280, 720)
@@ -173,20 +166,12 @@ func main() {
 	defer conn.Close()
 	log.Printf("INFO: Successfully connected to server/relay at %s", *serverAddrActual)
 
-	// Initialize gRPC service clients
 	remoteControlClient = pb.NewRemoteControlServiceClient(conn)
-	localFilesClient := pb.NewFileTransferServiceClient(conn) // Local var before passing
+	localFilesClient := pb.NewFileTransferServiceClient(conn)
 	terminalClient = pb.NewTerminalServiceClient(conn)
 
-	// Initialize shared global variables needed by file_system.go and potentially others
 	InitializeSharedGlobals(currentFyneApp, mainAppWindow, localFilesClient)
 	log.Println("INFO: Shared globals (AppInstance, mainWindow, filesClient) initialized.")
-
-	// Now, file_system.go's AppInstance, mainWindow, and filesClient should be non-nil.
-	// Verify (optional debug log):
-	// if AppInstance == nil || file_system.mainWindow == nil || file_system.filesClient == nil {
-	// log.Fatalf("FATAL: Globals in file_system.go are still nil after InitializeSharedGlobals!")
-	// }
 
 	if remoteControlClient == nil || localFilesClient == nil || terminalClient == nil {
 		log.Fatalf("ERROR: Failed to create one or more gRPC clients!")
@@ -267,12 +252,11 @@ func main() {
 	treeContainer := container.NewScroll(fileTree)
 
 	getFSButton := widget.NewButton("Files", func() {
-		// Now AppInstance in file_system.go should be valid for creating new windows
-		filesWindow := AppInstance.NewWindow("File Browser") // AppInstance is from file_system.go
+		filesWindow := AppInstance.NewWindow("File Browser")
 		filesWindow.SetContent(treeContainer)
 		filesWindow.Resize(fyne.NewSize(500, 600))
 		filesWindow.Show()
-		if filesClient != nil { // filesClient is from file_system.go
+		if filesClient != nil {
 			go fetchChildren("")
 		} else {
 			log.Println("Files button: filesClient (shared) is nil, cannot fetch root.")
@@ -281,7 +265,7 @@ func main() {
 	})
 
 	terminalButton := widget.NewButton("Terminal", func() {
-		openTerminalWindow(currentFyneApp) // Pass the app instance created in main
+		openTerminalWindow(currentFyneApp)
 	})
 
 	pingLabel = widget.NewLabel("RTT: --- ms")
@@ -295,11 +279,7 @@ func main() {
 	grpcToFFmpegReader, grpcToFFmpegWriter := io.Pipe()
 	ffmpegToBufferReader, ffmpegToBufferWriter := io.Pipe()
 
-	// rawFrameBuffer and frameImageData are defined in video_pipeline.go
-	// Ensure they are accessible (e.g. package-level vars in video_pipeline.go)
-
 	go func() {
-		// refreshTreeChan is from file_system.go
 		for parentIdToRefresh := range refreshTreeChan {
 			log.Printf("Received refresh signal for children of: '%s'", parentIdToRefresh)
 			if fileTree != nil {
@@ -323,8 +303,6 @@ func main() {
 	log.Println("INFO: Fyne app exited. Client shutting down.")
 	streamCancelMain()
 	close(inputEvents)
-	// refreshTreeChan is from file_system.go, close it there if appropriate, or manage lifecycle
-	// For now, assuming it's closed when no longer needed (e.g. here at app exit)
 	close(refreshTreeChan)
 
 	terminalMutex.Lock()
@@ -337,7 +315,6 @@ func main() {
 	log.Println("Client shutdown complete.")
 }
 
-// loadTLSCredentialsFromEmbed remains the same
 func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.TransportCredentials, error) {
 	clientCert, err := tls.X509KeyPair(clientCertEmbed, clientKeyEmbed)
 	if err != nil {
@@ -368,7 +345,6 @@ func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.Transport
 	return credentials.NewTLS(config), nil
 }
 
-// startPinger remains the same
 func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 	if client == nil {
 		log.Println("Pinger: RemoteControlServiceClient is nil.")
@@ -421,22 +397,19 @@ func startPinger(ctx context.Context, client pb.RemoteControlServiceClient) {
 	}
 }
 
-// Terminal functions (appendToTerminalOutput, openTerminalWindow, sendTerminalCommand, receiveTerminalOutput)
-// are assumed to be in the same package (main) or properly imported if in a different one.
-// For this example, they are kept in main.go as per the user's provided structure.
-
-// appendToTerminalOutput remains the same
 func appendToTerminalOutput(textChunk string) {
 	terminalMutex.Lock()
 	defer terminalMutex.Unlock()
-	if terminalOutputRichText == nil {
-		log.Println("DEBUG: appendToTerminalOutput - terminalOutputRichText is nil, cannot append.")
+
+	if terminalOutputDisplay == nil {
+		log.Println("DEBUG: appendToTerminalOutput - terminalOutputDisplay is nil, cannot append.")
 		return
 	}
-	terminalOutputRichText.Segments = append(terminalOutputRichText.Segments,
-		&widget.TextSegment{Text: textChunk, Style: widget.RichTextStyleInline},
-	)
-	terminalOutputRichText.Refresh()
+
+	currentText := terminalOutputDisplay.Text
+	newText := currentText + textChunk
+	terminalOutputDisplay.SetText(newText) // SetText should refresh EntryEx as well
+
 	if terminalScroll != nil {
 		go func() {
 			time.Sleep(20 * time.Millisecond)
@@ -449,7 +422,6 @@ func appendToTerminalOutput(textChunk string) {
 	}
 }
 
-// openTerminalWindow remains the same, ensure it uses the passed fyne.App
 func openTerminalWindow(theApp fyne.App) {
 	terminalMutex.Lock()
 	if terminalWindow != nil {
@@ -462,19 +434,14 @@ func openTerminalWindow(theApp fyne.App) {
 
 	if terminalClient == nil {
 		log.Println("ERROR: openTerminalWindow - Terminal client not initialized.")
-		// Parent dialog to mainAppWindow (which is the global mainWindow now set via InitializeSharedGlobals)
-		var parentWin fyne.Window
-		// Access the shared mainWindow if available
-		// This requires mainWindow to be correctly set by InitializeSharedGlobals
-		// For now, we assume 'mainWindow' from file_system.go is the one to use
-		// This part needs careful handling of which window is the "main" one for dialogs.
-		// Let's assume the 'mainWindow' set via InitializeSharedGlobals is the correct parent.
-		parentWin = GetMainWindow() // Hypothetical getter for the shared mainWindow
-
+		parentWin := mainWindow
 		if parentWin != nil {
 			dialog.ShowError(fmt.Errorf("Terminal client not available"), parentWin)
 		} else {
-			log.Println("Cannot show terminal error dialog: no main parent window available via GetMainWindow().")
+			log.Println("Cannot show terminal error dialog: global mainWindow is nil.")
+			if drv := theApp.Driver(); drv != nil && len(drv.AllWindows()) > 0 {
+				dialog.ShowError(fmt.Errorf("Terminal client not available (main window nil)"), drv.AllWindows()[0])
+			}
 		}
 		return
 	}
@@ -483,16 +450,23 @@ func openTerminalWindow(theApp fyne.App) {
 	ctx, thisWindowCancelFunc := context.WithCancel(context.Background())
 	log.Printf("DEBUG: openTerminalWindow - Created new stream context %p with cancel func %p", ctx, thisWindowCancelFunc)
 
-	currentOutputRichText := widget.NewRichText()
-	currentScroll := container.NewScroll(currentOutputRichText)
+	// Use wx.NewEntryEx for terminal output
+	// The constructor NewEntryEx(minRows int) makes it multiline if minRows > 1
+	currentOutputDisplay := wx.NewEntryEx(10)          // 10 is an arbitrary number for initial visible rows
+	currentOutputDisplay.Wrapping = fyne.TextWrapBreak // Or fyne.TextWrapWord
+	currentOutputDisplay.SetReadOnly(true)             // Make it non-editable
+	// currentOutputDisplay.TextStyle = fyne.TextStyle{Monospace: true} // Optional: for more terminal-like look
+
+	currentScroll := container.NewScroll(currentOutputDisplay)
 	currentScroll.SetMinSize(fyne.NewSize(640, 400))
+
 	currentInput := widget.NewEntry()
 	currentInput.SetPlaceHolder("Enter command or input here...")
 
 	terminalMutex.Lock()
 	terminalWindow = w
 	terminalStreamCancel = thisWindowCancelFunc
-	terminalOutputRichText = currentOutputRichText
+	terminalOutputDisplay = currentOutputDisplay // Store the EntryEx
 	terminalInput = currentInput
 	terminalScroll = currentScroll
 	terminalMutex.Unlock()
@@ -538,7 +512,7 @@ func openTerminalWindow(theApp fyne.App) {
 			currentTerminalStream = nil
 			log.Println("DEBUG: SetOnClosed - Cleaning global resources for the closed terminal window.")
 			terminalStreamCancel = nil
-			terminalOutputRichText = nil
+			terminalOutputDisplay = nil
 			terminalInput = nil
 			terminalScroll = nil
 		} else {
@@ -550,7 +524,6 @@ func openTerminalWindow(theApp fyne.App) {
 	w.Canvas().Focus(currentInput)
 }
 
-// sendTerminalCommand remains the same
 func sendTerminalCommand(inputWidget *widget.Entry) {
 	if inputWidget == nil {
 		log.Println("DEBUG: sendTerminalCommand - inputWidget is nil")
@@ -598,7 +571,6 @@ func sendTerminalCommand(inputWidget *widget.Entry) {
 	}
 }
 
-// receiveTerminalOutput remains the same
 func receiveTerminalOutput(stream pb.TerminalService_CommandStreamClient, streamCtx context.Context, streamCancel context.CancelFunc) {
 	log.Printf("DEBUG: receiveTerminalOutput started. Stream: %p, Context: %p, CancelFunc: %p", stream, streamCtx, streamCancel)
 	defer func() {
@@ -651,26 +623,3 @@ func receiveTerminalOutput(stream pb.TerminalService_CommandStreamClient, stream
 		}
 	}
 }
-
-// GetMainWindow is a helper to access the shared mainWindow.
-// This assumes mainWindow in file_system.go is the one to be returned.
-// This function would ideally be in file_system.go or a shared utility file.
-// For now, defining it here for clarity of intent for openTerminalWindow.
-// Ensure that the 'mainWindow' variable in file_system.go is actually the one you want.
-func GetMainWindow() fyne.Window {
-	// This needs to return the actual main window instance.
-	// If 'mainWindow' is a global in the 'main' package (declared in file_system.go),
-	// and correctly initialized by main(), this would work.
-	// However, direct access `return mainWindow` (referring to file_system.go's var)
-	// is cleaner if this function is in file_system.go or if it's passed around.
-	// For now, this is a placeholder for how openTerminalWindow might get its parent.
-	// The actual 'mainWindow' from file_system.go should be used.
-	// This function is problematic if main.go's mainAppWindow is different from file_system.go's mainWindow
-	// The InitializeSharedGlobals should make them the same.
-	return GlobalMainWindow // Access the global var set by InitializeSharedGlobals
-}
-
-// GlobalMainWindow is a package-level variable in main.go to hold the main window reference
-// It will be set by InitializeSharedGlobals via file_system.go's mainWindow.
-// This is a bit convoluted; the ideal is that file_system.go's mainWindow IS the main window.
-var GlobalMainWindow fyne.Window
