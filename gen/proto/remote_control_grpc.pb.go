@@ -150,3 +150,105 @@ var RemoteControlService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "proto/remote_control.proto",
 }
+
+const (
+	TerminalService_CommandStream_FullMethodName = "/control_grpc.TerminalService/CommandStream"
+)
+
+// TerminalServiceClient is the client API for TerminalService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Service for Terminal Interaction
+type TerminalServiceClient interface {
+	// Bidirectional stream for an interactive terminal session
+	// Client sends commands, server streams back output.
+	CommandStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalRequest, TerminalResponse], error)
+}
+
+type terminalServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTerminalServiceClient(cc grpc.ClientConnInterface) TerminalServiceClient {
+	return &terminalServiceClient{cc}
+}
+
+func (c *terminalServiceClient) CommandStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalRequest, TerminalResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TerminalService_ServiceDesc.Streams[0], TerminalService_CommandStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TerminalRequest, TerminalResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TerminalService_CommandStreamClient = grpc.BidiStreamingClient[TerminalRequest, TerminalResponse]
+
+// TerminalServiceServer is the server API for TerminalService service.
+// All implementations should embed UnimplementedTerminalServiceServer
+// for forward compatibility.
+//
+// Service for Terminal Interaction
+type TerminalServiceServer interface {
+	// Bidirectional stream for an interactive terminal session
+	// Client sends commands, server streams back output.
+	CommandStream(grpc.BidiStreamingServer[TerminalRequest, TerminalResponse]) error
+}
+
+// UnimplementedTerminalServiceServer should be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedTerminalServiceServer struct{}
+
+func (UnimplementedTerminalServiceServer) CommandStream(grpc.BidiStreamingServer[TerminalRequest, TerminalResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method CommandStream not implemented")
+}
+func (UnimplementedTerminalServiceServer) testEmbeddedByValue() {}
+
+// UnsafeTerminalServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TerminalServiceServer will
+// result in compilation errors.
+type UnsafeTerminalServiceServer interface {
+	mustEmbedUnimplementedTerminalServiceServer()
+}
+
+func RegisterTerminalServiceServer(s grpc.ServiceRegistrar, srv TerminalServiceServer) {
+	// If the following call pancis, it indicates UnimplementedTerminalServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&TerminalService_ServiceDesc, srv)
+}
+
+func _TerminalService_CommandStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(TerminalServiceServer).CommandStream(&grpc.GenericServerStream[TerminalRequest, TerminalResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TerminalService_CommandStreamServer = grpc.BidiStreamingServer[TerminalRequest, TerminalResponse]
+
+// TerminalService_ServiceDesc is the grpc.ServiceDesc for TerminalService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TerminalService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "control_grpc.TerminalService",
+	HandlerType: (*TerminalServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "CommandStream",
+			Handler:       _TerminalService_CommandStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "proto/remote_control.proto",
+}

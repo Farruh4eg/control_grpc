@@ -8,6 +8,12 @@ service RemoteControlService {
   rpc Ping(PingRequest) returns (PingResponse);
 }
 
+// Service for Terminal Interaction
+service TerminalService {
+  // Bidirectional stream for an interactive terminal session
+  // Client sends commands, server streams back output.
+  rpc CommandStream(stream TerminalRequest) returns (stream TerminalResponse);
+}
 
 message FeedRequest {
   bool success = 1;
@@ -49,4 +55,24 @@ message PingRequest {
 
 message PingResponse {
   int64 client_timestamp_nano = 1; // Echoed from request
+}
+
+// Terminal Messages
+message TerminalRequest {
+  string session_id = 1; // For future use, e.g., to identify terminal sessions
+  string command = 2;    // The command string to execute
+  // bool stop_session = 3; // For future use, to signal closing the terminal
+}
+
+message TerminalResponse {
+  string session_id = 1;
+  enum OutputType {
+    STDOUT = 0;
+    STDERR = 1;
+    SYSTEM_MESSAGE = 2; // For messages from the terminal service itself (e.g., command ended)
+    ERROR_MESSAGE = 3;  // For errors from the terminal service itself
+  }
+  OutputType output_type = 2;
+  string output_line = 3; // A line of output or a message
+  bool command_ended = 4; // True if this message signifies the end of the current command's output
 }
