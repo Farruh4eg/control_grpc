@@ -408,18 +408,13 @@ func appendToTerminalOutput(textChunk string) {
 
 	currentText := terminalOutputDisplay.Text
 	newText := currentText + textChunk
-	terminalOutputDisplay.SetText(newText) // SetText should refresh EntryEx as well
+	terminalOutputDisplay.SetText(newText)
+	terminalOutputDisplay.Refresh()
 
-	if terminalScroll != nil {
-		go func() {
-			time.Sleep(20 * time.Millisecond)
-			terminalMutex.Lock()
-			if terminalScroll != nil {
-				terminalScroll.ScrollToBottom()
-			}
-			terminalMutex.Unlock()
-		}()
-	}
+	targetRow := strings.Count(newText, "\n")
+	terminalOutputDisplay.CursorRow = targetRow
+	terminalOutputDisplay.Refresh()
+	terminalScroll.Refresh()
 }
 
 func openTerminalWindow(theApp fyne.App) {
@@ -452,10 +447,10 @@ func openTerminalWindow(theApp fyne.App) {
 
 	// Use wx.NewEntryEx for terminal output
 	// The constructor NewEntryEx(minRows int) makes it multiline if minRows > 1
-	currentOutputDisplay := wx.NewEntryEx(10)          // 10 is an arbitrary number for initial visible rows
-	currentOutputDisplay.Wrapping = fyne.TextWrapBreak // Or fyne.TextWrapWord
-	currentOutputDisplay.SetReadOnly(true)             // Make it non-editable
-	// currentOutputDisplay.TextStyle = fyne.TextStyle{Monospace: true} // Optional: for more terminal-like look
+	currentOutputDisplay := wx.NewEntryEx(10)                        // 10 is an arbitrary number for initial visible rows
+	currentOutputDisplay.Wrapping = fyne.TextWrapBreak               // Or fyne.TextWrapWord
+	currentOutputDisplay.SetReadOnly(true)                           // Make it non-editable
+	currentOutputDisplay.TextStyle = fyne.TextStyle{Monospace: true} // Optional: for more terminal-like look
 
 	currentScroll := container.NewScroll(currentOutputDisplay)
 	currentScroll.SetMinSize(fyne.NewSize(640, 400))
