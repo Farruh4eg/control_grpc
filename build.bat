@@ -38,7 +38,7 @@ cd server
 echo Enabling CGO for server build (CGO_ENABLED=1) and using -tags cgo
 set CGO_ENABLED=1
 echo Building server with verbose flags (-v -x)...
-go build -v -x -tags cgo -ldflags="-extldflags=-static" -o ..\server.exe .
+go build -v -x -tags cgo -ldflags="-extldflags=-static -s -w" -o ..\server.exe .
 IF %ERRORLEVEL% NEQ 0 (
     echo ERROR: Server build failed!
     set CGO_ENABLED=
@@ -57,7 +57,7 @@ IF NOT EXIST "client" (
     goto :cleanup
 )
 cd client
-go build -o ..\client.exe .
+go build -o ..\client.exe -ldflags="-extldflags=-static -s -w" .
 IF %ERRORLEVEL% NEQ 0 (
     echo ERROR: Client build failed!
     cd ..
@@ -73,7 +73,7 @@ IF NOT EXIST "launcher.go" (
     echo ERROR: 'launcher.go' not found in the project root.
     goto :cleanup
 )
-go build launcher.go
+go build -ldflags="-extldflags=-static -s -w" launcher.go
 IF %ERRORLEVEL% NEQ 0 (
     echo ERROR: Launcher build failed!
     goto :cleanup
@@ -87,7 +87,7 @@ IF NOT EXIST "relay_server.go" (
     echo ERROR: 'relay_server.go' not found in the project root.
     goto :cleanup
 )
-go build relay_server.go
+go build -ldflags="-extldflags=-static -s -w" relay_server.go
 IF %ERRORLEVEL% NEQ 0 (
     echo ERROR: Relay server build failed!
     goto :cleanup
