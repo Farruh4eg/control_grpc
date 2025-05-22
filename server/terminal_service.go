@@ -1,13 +1,13 @@
 package main
 
 import (
-	_ "embed" // Required for //go:embed
+	_ "embed"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath" // Required for path manipulation
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -31,11 +31,7 @@ var (
 	winptyInitErr  error
 )
 
-// extractAndWriteFile extracts embedded data to a specified path if it doesn't exist or content differs.
-// For simplicity, this version overwrites. A more robust version might check checksums.
 func extractFileToPath(outputPath string, data []byte, perm os.FileMode) error {
-	// For DLLs/EXEs, we usually want to ensure the latest embedded version is present.
-	// Overwriting is generally fine for this use case.
 	log.Printf("INFO: Ensuring presence of %s by writing/overwriting...", outputPath)
 	err := os.WriteFile(outputPath, data, perm)
 	if err != nil {
@@ -46,7 +42,6 @@ func extractFileToPath(outputPath string, data []byte, perm os.FileMode) error {
 }
 
 // ensureWinptyBinariesAreExtracted extracts the embedded winpty.dll and winpty-agent.exe
-// to the directory of the current executable. This function is designed to be called once.
 func ensureWinptyBinariesAreExtracted() error {
 	winptyInitOnce.Do(func() {
 		log.Println("INFO: Performing one-time extraction check for WinPTY binaries...")
@@ -87,10 +82,8 @@ func ensureWinptyBinariesAreExtracted() error {
 	return winptyInitErr
 }
 
-// ansiEscapePattern remains the same
 var ansiEscapePattern = regexp.MustCompile(`(\x1b\[\??[0-9;]*[a-zA-Z])|(\x1b\][^\a]*\a)|\x07`)
 
-// stripANSI remains the same
 func stripANSI(str string) string {
 	return ansiEscapePattern.ReplaceAllString(str, "")
 }
@@ -99,12 +92,10 @@ func stripANSI(str string) string {
 func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) error {
 	log.Println("TerminalService (WinPTY): Client connected to CommandStream.")
 
-	// Ensure WinPTY binaries are extracted. This will run the extraction logic only once.
 	if err := ensureWinptyBinariesAreExtracted(); err != nil {
 		log.Printf("TerminalService (WinPTY): Critical error ensuring WinPTY binaries: %v", err)
 		return status.Errorf(codes.FailedPrecondition, "failed to prepare WinPTY environment: %v", err)
 	}
-	// If ensureWinptyBinariesAreExtracted returned nil, the files should be ready.
 
 	ctx := stream.Context()
 
@@ -113,9 +104,9 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 		homeDir, homeErr := os.UserHomeDir()
 		if homeErr != nil {
 			log.Printf("TerminalService (WinPTY): Error getting CWD (%v) and home dir (%v). Using OS default.", err, homeErr)
-			if runtime.GOOS == "windows" { // Should always be windows for winpty
+			if runtime.GOOS == "windows" {
 				initialCwd = "C:\\"
-			} else { // Should not happen if OS check is done properly
+			} else {
 				initialCwd = "/"
 			}
 		} else {
@@ -131,17 +122,13 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 		psPath, errPs := exec.LookPath("powershell.exe")
 		if errPs == nil {
 			shellPath = psPath
-			// -NoExit is often problematic for PTY control as the shell won't close when the command does.
-			// For interactive sessions, it's usually better to let the shell manage its lifecycle.
-			// If you need the shell to stay open after a command, that's a different PTY usage pattern.
-			// For a general-purpose terminal, just starting powershell.exe is often enough.
-			shellCmdArgs = []string{"-NoProfile"} // -NoExit might prevent clean PTY closure
+			shellCmdArgs = []string{"-NoProfile"}
 			log.Printf("TerminalService (WinPTY): Using PowerShell at %s with args: %v", shellPath, shellCmdArgs)
 		} else {
 			cmdPath, errCmd := exec.LookPath("cmd.exe")
 			if errCmd == nil {
 				shellPath = cmdPath
-				shellCmdArgs = []string{} // cmd.exe usually doesn't need special startup args for PTY
+				shellCmdArgs = []string{}
 				log.Printf("TerminalService (WinPTY): PowerShell not found, falling back to CMD at %s", shellPath)
 			} else {
 				log.Printf("TerminalService (WinPTY): Error - Neither PowerShell nor CMD found. PowerShell err: %v, CMD err: %v", errPs, errCmd)
@@ -149,7 +136,6 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 			}
 		}
 	} else {
-		// This check is good, but ensureWinptyBinariesAreExtracted might also implicitly handle OS check
 		log.Printf("TerminalService (WinPTY): Error - go-winpty is intended for Windows. Current OS: %s", runtime.GOOS)
 		return status.Errorf(codes.FailedPrecondition, "go-winpty is for Windows only, server OS is %s", runtime.GOOS)
 	}
@@ -158,7 +144,7 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 	fullCmdLineBuilder.WriteString(shellPath)
 	for _, arg := range shellCmdArgs {
 		fullCmdLineBuilder.WriteString(" ")
-		if strings.Contains(arg, " ") { // Quote arguments with spaces
+		if strings.Contains(arg, " ") {
 			fullCmdLineBuilder.WriteString("\"")
 			fullCmdLineBuilder.WriteString(arg)
 			fullCmdLineBuilder.WriteString("\"")
@@ -173,11 +159,11 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 	ptyOptions := &winpty.Options{
 		Command: fullCmdLine,
 		Dir:     initialCwd,
-		Env:     os.Environ(), // Pass current environment
-		Flags: winpty.WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN | // Try to ensure the agent shuts down with the PTY
-			winpty.WINPTY_FLAG_ALLOW_CURPROC_DESKTOP_CREATION, // May be needed in some contexts
-		InitialCols: 120, // Default cols
-		InitialRows: 30,  // Default rows
+		Env:     os.Environ(),
+		Flags: winpty.WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN |
+			winpty.WINPTY_FLAG_ALLOW_CURPROC_DESKTOP_CREATION,
+		InitialCols: 120,
+		InitialRows: 30,
 	}
 
 	pty, err := winpty.OpenWithOptions(*ptyOptions)
@@ -190,24 +176,21 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 	defer func() {
 		log.Println("TerminalService (WinPTY): Cleaning up WinPTY session...")
 		if pty != nil {
-			// Closing StdIn first can sometimes help the PTY process to terminate if it's waiting for input.
-			// pty.StdIn.Close() // Optional: try closing stdin first
-			pty.Close() // This should terminate the agent and the shell process.
+			pty.StdIn.Close()
+			pty.Close()
 			log.Println("TerminalService (WinPTY): pty.Close() called.")
 		}
 		log.Println("TerminalService (WinPTY): WinPTY session cleanup complete.")
 	}()
 
 	var ptyReadWg sync.WaitGroup
-	ptyReadWg.Add(1) // For the stdout reading goroutine
+	ptyReadWg.Add(1)
 
-	// Goroutine to read from PTY's stdout and send to client
 	go func() {
 		defer ptyReadWg.Done()
 		log.Println("TerminalService (WinPTY): PTY stdout read goroutine started.")
-		buf := make([]byte, 8192) // Read buffer
+		buf := make([]byte, 8192)
 		for {
-			// Check context before blocking on Read
 			select {
 			case <-ctx.Done():
 				log.Printf("TerminalService (WinPTY): PTY stdout read goroutine: stream context done: %v. Exiting.", ctx.Err())
@@ -222,20 +205,19 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 
 				if utf8.Valid(outputData) {
 					rawString := string(outputData)
-					outputToSend = stripANSI(rawString) // Strip ANSI codes
+					outputToSend = stripANSI(rawString)
 				} else {
-					outputToSend = "\n" // Send newline for invalid UTF-8
+					outputToSend = "\n"
 					log.Printf("TerminalService (WinPTY): Invalid UTF-8 detected in PTY output chunk. Sending newline. Original (hex): %x", outputData)
 				}
 
-				// Send the processed output
 				if sendErr := stream.Send(&pb.TerminalResponse{
 					OutputType:   pb.TerminalResponse_STDOUT,
 					OutputLine:   outputToSend,
-					CommandEnded: false, // Typically false unless PTY explicitly signals end of a specific command
+					CommandEnded: false,
 				}); sendErr != nil {
 					log.Printf("TerminalService (WinPTY): Error sending PTY stdout to client: %v. Exiting read goroutine.", sendErr)
-					return // Stop if we can't send to client
+					return
 				}
 			}
 
@@ -244,7 +226,6 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 				if readErr == io.EOF {
 					log.Println("TerminalService (WinPTY): EOF reading from PTY stdout. Shell process likely exited.")
 				} else {
-					// Don't log error if context was cancelled, as that's an expected closure path
 					if ctx.Err() == nil {
 						log.Printf("TerminalService (WinPTY): Error reading from PTY stdout: %v", readErr)
 						finalMsg = fmt.Sprintf("--- PTY read error: %v ---", readErr)
@@ -253,20 +234,17 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 						finalMsg = fmt.Sprintf("--- PTY session ended (context done, stdout read err: %v) ---", ctx.Err())
 					}
 				}
-				// Attempt to send a final message indicating the PTY session has ended
-				// This might fail if the stream is already broken, so ignore error.
 				_ = stream.Send(&pb.TerminalResponse{OutputLine: finalMsg, CommandEnded: true})
-				return // Exit goroutine on EOF or error
+				return
 			}
 		}
 	}()
 
-	// Main loop to receive commands from client and write to PTY's stdin
 	for {
 		select {
-		case <-ctx.Done(): // Client disconnected or server shutting down
+		case <-ctx.Done():
 			log.Printf("TerminalService (WinPTY): Main loop: stream context done: %v. Waiting for PTY read goroutine to finish.", ctx.Err())
-			ptyReadWg.Wait() // Wait for the stdout reader to finish
+			ptyReadWg.Wait()
 			log.Println("TerminalService (WinPTY): Main loop: PTY read goroutine finished. Exiting CommandStream.")
 			return ctx.Err()
 		default:
@@ -274,7 +252,6 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 
 		req, err := stream.Recv()
 		if err != nil {
-			// Handle client closing the stream or other Recv errors
 			if err == io.EOF {
 				log.Println("TerminalService (WinPTY): Client closed send stream (EOF). PTY session will continue until explicitly closed or shell exits.")
 			} else {
@@ -285,33 +262,26 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 					log.Printf("TerminalService (WinPTY): Error receiving input from client: %v", err)
 				}
 			}
-			// Don't return immediately on client EOF for Recv; PTY might still be running.
-			// Wait for context to be done or PTY to close.
-			// However, if Recv fails due to cancellation, the select ctx.Done() above will catch it.
-			// If it's a non-EOF, non-cancel error, it might be a stream problem.
-			if err != io.EOF { // For non-EOF errors, it's safer to terminate.
+
+			if err != io.EOF {
 				log.Printf("TerminalService (WinPTY): Non-EOF error on Recv: %v. Terminating session.", err)
 				ptyReadWg.Wait()
 				return err
 			}
-			// If it is EOF, the client has stopped sending. We keep the PTY alive
-			// until the context is cancelled (client fully disconnects or server stops).
-			// The PTY output will continue to be sent.
+
 			log.Println("TerminalService (WinPTY): Client stopped sending (EOF on Recv). PTY output stream remains active.")
-			<-ctx.Done() // Wait for context to be cancelled
+			<-ctx.Done()
 			log.Println("TerminalService (WinPTY): Context cancelled after client Recv EOF. Terminating session.")
 			ptyReadWg.Wait()
 			return ctx.Err()
 		}
 
 		inputFromClient := req.GetCommand()
-		// WinPTY expects CRLF for newlines when interacting with shells like cmd/powershell
 		inputBytes := []byte(inputFromClient + "\r\n")
 
 		if _, writeErr := pty.StdIn.Write(inputBytes); writeErr != nil {
 			log.Printf("TerminalService (WinPTY): Error writing to PTY stdin: %v", writeErr)
-			// This is a critical error, implies PTY is broken.
-			_ = stream.Send(&pb.TerminalResponse{ // Attempt to inform client
+			_ = stream.Send(&pb.TerminalResponse{
 				OutputType:   pb.TerminalResponse_ERROR_MESSAGE,
 				OutputLine:   fmt.Sprintf("--- Error writing to PTY: %v ---", writeErr),
 				CommandEnded: true,
@@ -322,7 +292,6 @@ func (s *server) CommandStream(stream pb.TerminalService_CommandStreamServer) er
 	}
 }
 
-// firstNBytes helper remains the same
 func firstNBytes(data []byte, n int) []byte {
 	if len(data) > n {
 		return data[:n]

@@ -152,7 +152,7 @@ func NewRelayServer() *RelayServer {
 
 // generateMemorableID creates a unique, memorable ID for a host.
 func (r *RelayServer) generateMemorableID() string {
-	r.mu.Lock() // Lock before accessing hostControlConns
+	r.mu.Lock()
 	defer r.mu.Unlock()
 	maxAttempts := 10
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -279,8 +279,6 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				continue
 			}
 
-			// ALWAYS send VERIFY_PASSWORD_REQUEST to the host.
-			// The host will decide if a password is required and if the provided one (even if empty) is valid.
 			requestToken := uuid.New().String()
 			r.authMu.Lock()
 			r.pendingAuthentications[requestToken] = PendingAuthRequest{
@@ -315,7 +313,6 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 					delete(r.pendingAuthentications, token)
 				}
 			}(requestToken, conn, targetHostID)
-			// Wait for host's response via VERIFY_PASSWORD_RESPONSE command
 
 		case "VERIFY_PASSWORD_RESPONSE":
 			if len(parts) < 3 {
@@ -333,8 +330,6 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 				continue
 			}
 
-			// The 'registeredHostID' for this connection is the ID of the host sending this response.
-			// It must match the targetHostID stored in the pending request.
 			if registeredHostID != pendingReq.targetHostID {
 				log.Printf("WARN: VERIFY_PASSWORD_RESPONSE token %s valid, but received from unexpected host %s (expected %s). Ignoring.",
 					requestToken, registeredHostID, pendingReq.targetHostID)
@@ -379,7 +374,6 @@ func (r *RelayServer) handleControlConnection(conn net.Conn) {
 
 // findHostByConn iterates through hostControlConns to find if a connection is already registered.
 // This is useful if a host tries to re-register with the same connection.
-// Must be called with r.mu locked or ensure thread safety if called elsewhere.
 func (r *RelayServer) findHostByConn(conn net.Conn) (hostID string, found bool) {
 	for id, c := range r.hostControlConns {
 		if c == conn {

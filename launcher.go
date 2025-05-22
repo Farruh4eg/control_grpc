@@ -27,7 +27,7 @@ const (
 	directConnectionTimeout = 5 * time.Second
 	defaultRelayControlAddr = "193.23.218.76:34000"
 	effectiveHostIDPrefix   = "EFFECTIVE_HOST_ID:"
-	bcryptCost              = 12 // Cost factor for bcrypt hashing
+	bcryptCost              = 12
 )
 
 // getExecutablePath determines the full path to an application executable
@@ -58,11 +58,9 @@ func main() {
 	hostButton := widget.NewButton("Become a Host (Direct & Relay)", func() {
 		log.Println("INFO: 'Become a Host' clicked.")
 
-		// Create a password entry widget
 		passwordEntryWidget := widget.NewPasswordEntry()
 		passwordEntryWidget.SetPlaceHolder("Leave empty for no password")
 
-		// Create a form dialog for password input
 		formItems := []*widget.FormItem{
 			{Text: "Session Password", Widget: passwordEntryWidget, HintText: "Enter a password for this session."},
 		}
@@ -70,7 +68,7 @@ func main() {
 		passwordDialog := dialog.NewForm("Set Session Password", "Set", "Cancel", formItems, func(ok bool) {
 			if !ok {
 				log.Println("INFO: Host cancelled password input.")
-				return // User cancelled
+				return
 			}
 
 			plainPassword := passwordEntryWidget.Text
@@ -90,7 +88,6 @@ func main() {
 				hashedPassword = string(hashBytes)
 				log.Println("INFO: Password hashed successfully.")
 			}
-			// Pass the hashed password (or empty string) to the server process
 			launchServerProcess(mainWindow, fyneApp, relayServerEntry.Text, hashedPassword)
 		}, mainWindow)
 
@@ -131,7 +128,6 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 	}
 
 	args := []string{"-relay=true", "-hostID=LauncherHost", "-relayServer=" + currentRelayAddr}
-	// Pass the hashed password (or empty string if no password was set)
 	if hashedPassword != "" {
 		args = append(args, "-sessionPassword="+hashedPassword)
 	}
@@ -288,7 +284,6 @@ func connectViaRelay(targetHostID, plainTextPassword, relayControlAddr string) (
 	if plainTextPassword == "" {
 		cmdStr = fmt.Sprintf("INITIATE_CLIENT_SESSION %s\n", targetHostID)
 	} else {
-		// Send the plain text password for the host to verify against its hash
 		cmdStr = fmt.Sprintf("INITIATE_CLIENT_SESSION %s %s\n", targetHostID, plainTextPassword)
 	}
 
@@ -343,19 +338,18 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 	hostIDEntry := widget.NewEntry()
 	hostIDEntry.SetPlaceHolder("Host's IP:PORT (direct) or HostID (relay)")
 
-	passwordEntryWidget := widget.NewPasswordEntry() // Use widget.NewPasswordEntry for the input field
+	passwordEntryWidget := widget.NewPasswordEntry()
 	passwordEntryWidget.SetPlaceHolder("Password (if host requires it)")
 
 	formItems := []*widget.FormItem{
 		{Text: "Target Address/HostID", Widget: hostIDEntry},
-		{Text: "Password (for Relay)", Widget: passwordEntryWidget}, // Use the widget here
+		{Text: "Password (for Relay)", Widget: passwordEntryWidget},
 	}
 
 	form := &widget.Form{
 		Items: formItems,
 		OnSubmit: func() {
 			userInput := hostIDEntry.Text
-			// This is the plain text password the user enters to connect
 			plainTextPasswordAttempt := passwordEntryWidget.Text
 			if userInput == "" {
 				dialog.ShowInformation("Input Required", "Please enter the target address or HostID.", inputWindow)
@@ -400,7 +394,6 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 			targetHostID := userInput
 			log.Printf("INFO: Direct connection failed/skipped. Attempting relay for HostID '%s' using relay %s...", targetHostID, relayServerControlAddr)
 
-			// Pass the plainTextPasswordAttempt to connectViaRelay
 			relayConnected, relayedAddressForClient, sessionToken, errRelay := connectViaRelay(targetHostID, plainTextPasswordAttempt, relayServerControlAddr)
 
 			if relayConnected {
