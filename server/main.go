@@ -18,13 +18,13 @@ import (
 	"sync"
 	"time"
 
-	pb "control_grpc/gen/proto" // Your generated protobuf package
+	pb "control_grpc/gen/proto"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"golang.org/x/crypto/bcrypt" // Import bcrypt
+	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -39,7 +39,6 @@ var serverKeyEmbed []byte
 //go:embed client.crt
 var clientCACertEmbed []byte
 
-// server struct implements the gRPC service interfaces.
 type server struct {
 	pb.UnimplementedAuthServiceServer
 	pb.UnimplementedRemoteControlServiceServer
@@ -49,7 +48,7 @@ type server struct {
 	localGrpcAddr       string
 	sessionPasswordHash string
 	currentRelayHostID  string
-	grpcServer          *grpc.Server // Added a reference to the gRPC server
+	grpcServer          *grpc.Server
 }
 
 var (
@@ -68,9 +67,8 @@ var (
 )
 
 const effectiveHostIDPrefix = "EFFECTIVE_HOST_ID:"
-const shutdownTimeout = 5 * time.Second // Timeout for graceful shutdown
+const shutdownTimeout = 5 * time.Second
 
-// generateRandomHostID creates a random hexadecimal string.
 func generateRandomHostID(byteLength int) string {
 	bytes := make([]byte, byteLength)
 	if _, err := rand.Read(bytes); err != nil {
@@ -80,8 +78,6 @@ func generateRandomHostID(byteLength int) string {
 	return hex.EncodeToString(bytes)
 }
 
-// tryGracefulShutdown attempts to gracefully stop the gRPC server with a timeout.
-// Returns true if shutdown was initiated (either completed or timed out), false otherwise.
 func tryGracefulShutdown(s *server, timeout time.Duration) bool {
 	if s.grpcServer == nil {
 		log.Println("INFO: gRPC server instance is nil, no shutdown needed or already stopped.")
@@ -100,7 +96,7 @@ func tryGracefulShutdown(s *server, timeout time.Duration) bool {
 		log.Println("INFO: gRPC server gracefully stopped.")
 	case <-time.After(timeout):
 		log.Printf("WARN: Graceful shutdown timed out after %v. Forcing stop.", timeout)
-		s.grpcServer.Stop() // Force stop
+		s.grpcServer.Stop()
 		log.Println("INFO: gRPC server forcefully stopped.")
 	}
 	return true
@@ -146,7 +142,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(opts...)
-	s.grpcServer = grpcServer // Store reference in server struct
+	s.grpcServer = grpcServer
 
 	pb.RegisterAuthServiceServer(grpcServer, s)
 	pb.RegisterRemoteControlServiceServer(grpcServer, s)
@@ -184,14 +180,14 @@ func main() {
 
 	quitButton := widget.NewButton("Shutdown Server", func() {
 		log.Println("INFO: Shutdown button clicked. Initiating server shutdown sequence...")
-		// Disable button to prevent multiple clicks
+
 		serverStatusLabel.SetText("Server shutting down...")
 
 		if tryGracefulShutdown(s, shutdownTimeout) {
-			// Graceful shutdown initiated (completed or timed out and forced stop)
+
 		}
 		log.Println("INFO: Quitting Fyne application via button.")
-		fyneApp.Quit() // This will cause ShowAndRun() to return
+		fyneApp.Quit()
 	})
 
 	fyneWindow.SetContent(container.NewVBox(
@@ -205,21 +201,19 @@ func main() {
 
 	fyneWindow.SetOnClosed(func() {
 		log.Println("INFO: Fyne window closed by user. Initiating server shutdown sequence...")
-		// Note: Fyne app will quit automatically after this callback.
-		// We initiate graceful shutdown; main's defer will handle forceful stop if needed.
+
 		tryGracefulShutdown(s, shutdownTimeout)
-		// No need to call fyneApp.Quit() here, as Fyne handles it.
+
 		log.Println("INFO: Server shutdown process initiated from OnClosed. Fyne app will now quit.")
 	})
 
 	go func() {
 		log.Printf("INFO: gRPC Server starting for direct connections at %s", s.localGrpcAddr)
 		if err := grpcServer.Serve(localGrpcListener); err != nil {
-			// This error usually means the server was stopped (e.g., by GracefulStop or Stop)
-			// or failed to start.
+
 			log.Printf("INFO: grpcServer.Serve completed/exited: %v", err)
 			if fyneApp != nil && serverStatusLabel != nil && !strings.Contains(err.Error(), "closed") {
-				// Only show error if it's not a "server closed" type of error.
+
 				fyneApp.SendNotification(&fyne.Notification{
 					Title:   "gRPC Server Error",
 					Content: fmt.Sprintf("gRPC server issue: %v", err),
@@ -235,20 +229,18 @@ func main() {
 	}
 
 	log.Println("INFO: Starting Fyne application UI...")
-	fyneWindow.ShowAndRun() // This blocks until fyneApp.Quit() is called.
+	fyneWindow.ShowAndRun()
 
-	// --- Cleanup after Fyne app has exited ---
 	log.Println("INFO: Fyne application has exited.")
 	log.Println("INFO: Performing final server stop...")
 	if s.grpcServer != nil {
-		s.grpcServer.Stop() // Forceful stop as a last measure
+		s.grpcServer.Stop()
 		log.Println("INFO: Final grpcServer.Stop() called.")
 	}
 	log.Println("INFO: Server shutdown complete. Exiting application.")
-	os.Exit(0) // Ensure the program terminates
+	os.Exit(0)
 }
 
-// manageRelayRegistrationAndTunnels remains unchanged.
 func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localInitialIDHint, localGrpcSvcAddr string) {
 	var controlConn net.Conn
 	var err error
@@ -411,7 +403,6 @@ func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localIniti
 	}
 }
 
-// handleHostSideTunnel remains unchanged.
 func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost, sessionToken, registeredHostID string) {
 	logCtx := fmt.Sprintf("[Tunnel %s Host %s]", sessionToken[:6], registeredHostID)
 	log.Printf("INFO: %s Host-side: Attempting to connect to relay data endpoint %s", logCtx, relayDataAddrForHost)
@@ -487,7 +478,6 @@ func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost
 	}
 }
 
-// loadTLSCredentialsFromEmbed remains unchanged.
 func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
 	serverCert, err := tls.X509KeyPair(serverCertEmbed, serverKeyEmbed)
 	if err != nil {
@@ -507,12 +497,10 @@ func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
 	return credentials.NewTLS(config), nil
 }
 
-// Ping remains unchanged.
 func (s *server) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
 	return &pb.PingResponse{ClientTimestampNano: req.GetClientTimestampNano()}, nil
 }
 
-// isNetworkCloseError remains unchanged.
 func isNetworkCloseError(err error) bool {
 	if err == nil {
 		return false

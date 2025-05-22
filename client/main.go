@@ -5,13 +5,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
-	"flag" // Standard library flag package
+	"flag"
 	"fmt"
-	"image" // Used by imageCanvas and frameImageData type
+	"image"
 	"io"
 	"log"
 	"net"
-	"os" // Needed for os.Args and os.Exit
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +20,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/data/binding" // Kept for toggleButtonTextBinding
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"google.golang.org/grpc"
@@ -30,7 +30,6 @@ import (
 
 	pb "control_grpc/gen/proto"
 
-	// Import for the fynex-widgets EntryEx (assuming package name is 'wx')
 	"github.com/matwachich/fynex-widgets"
 )
 
@@ -53,7 +52,7 @@ var (
 	terminalWindow        fyne.Window
 	currentTerminalStream pb.TerminalService_CommandStreamClient
 	terminalStreamCancel  context.CancelFunc
-	terminalOutputDisplay *wx.EntryEx // Using EntryEx from fynex-widgets/wx
+	terminalOutputDisplay *wx.EntryEx
 	terminalInput         *widget.Entry
 	terminalScroll        *container.Scroll
 	terminalMutex         sync.Mutex
@@ -120,7 +119,7 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	currentFyneApp := app.NewWithID("com.example.controlgrpcclient.v5") // Use your unique ID
+	currentFyneApp := app.NewWithID("com.example.controlgrpcclient.v5")
 	mainAppWindow := currentFyneApp.NewWindow("Control GRPC client")
 
 	normalSize := fyne.NewSize(1280, 720)
@@ -445,12 +444,10 @@ func openTerminalWindow(theApp fyne.App) {
 	ctx, thisWindowCancelFunc := context.WithCancel(context.Background())
 	log.Printf("DEBUG: openTerminalWindow - Created new stream context %p with cancel func %p", ctx, thisWindowCancelFunc)
 
-	// Use wx.NewEntryEx for terminal output
-	// The constructor NewEntryEx(minRows int) makes it multiline if minRows > 1
-	currentOutputDisplay := wx.NewEntryEx(10)                        // 10 is an arbitrary number for initial visible rows
-	currentOutputDisplay.Wrapping = fyne.TextWrapBreak               // Or fyne.TextWrapWord
-	currentOutputDisplay.SetReadOnly(true)                           // Make it non-editable
-	currentOutputDisplay.TextStyle = fyne.TextStyle{Monospace: true} // Optional: for more terminal-like look
+	currentOutputDisplay := wx.NewEntryEx(10)
+	currentOutputDisplay.Wrapping = fyne.TextWrapBreak
+	currentOutputDisplay.SetReadOnly(true)
+	currentOutputDisplay.TextStyle = fyne.TextStyle{Monospace: true}
 
 	currentScroll := container.NewScroll(currentOutputDisplay)
 	currentScroll.SetMinSize(fyne.NewSize(640, 400))
@@ -461,7 +458,7 @@ func openTerminalWindow(theApp fyne.App) {
 	terminalMutex.Lock()
 	terminalWindow = w
 	terminalStreamCancel = thisWindowCancelFunc
-	terminalOutputDisplay = currentOutputDisplay // Store the EntryEx
+	terminalOutputDisplay = currentOutputDisplay
 	terminalInput = currentInput
 	terminalScroll = currentScroll
 	terminalMutex.Unlock()

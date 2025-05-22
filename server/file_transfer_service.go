@@ -10,12 +10,11 @@ import (
 	"path/filepath"
 	"runtime"
 
-	pb "control_grpc/gen/proto" // Assuming this path is correct
+	pb "control_grpc/gen/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// GetFS handles requests to list directory contents or filesystem roots.
 func (s *server) GetFS(ctx context.Context, req *pb.FSRequest) (*pb.FSResponse, error) {
 	reqPath := req.GetPath()
 	log.Printf("GetFS request received for path: '%s'", reqPath)
@@ -29,7 +28,7 @@ func (s *server) GetFS(ctx context.Context, req *pb.FSRequest) (*pb.FSResponse, 
 	var err error
 
 	if reqPath == "" {
-		// Requesting roots (e.g., drives on Windows, "/" on POSIX)
+
 		log.Println("Requesting filesystem roots...")
 		if runtime.GOOS == "windows" {
 			nodes = getWindowsDrives()
@@ -37,12 +36,12 @@ func (s *server) GetFS(ctx context.Context, req *pb.FSRequest) (*pb.FSResponse, 
 			nodes = getPosixRoot()
 		}
 	} else {
-		// Requesting contents of a specific path
+
 		log.Printf("Requesting contents of path: %s", reqPath)
 		nodes, err = listDirectoryContents(reqPath)
 		if err != nil {
 			log.Printf("Error listing directory '%s': %v", reqPath, err)
-			// Populate error message in response for client
+
 			if os.IsPermission(err) {
 				response.ErrorMessage = fmt.Sprintf("Permission denied: %v", filepath.Base(reqPath))
 			} else if os.IsNotExist(err) {
@@ -58,7 +57,6 @@ func (s *server) GetFS(ctx context.Context, req *pb.FSRequest) (*pb.FSResponse, 
 	return response, nil
 }
 
-// DownloadFile handles requests to stream a single file's content.
 func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService_DownloadFileServer) error {
 	filePath := req.GetPath()
 	log.Printf("DownloadFile request received for path: '%s'", filePath)
@@ -86,7 +84,7 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 	}
 	defer file.Close()
 
-	buffer := make([]byte, 1024*64) // 64KB chunk size
+	buffer := make([]byte, 1024*64)
 	firstChunkSent := false
 	log.Printf("Starting stream for file: '%s', Total size: %d bytes", filePath, fileInfo.Size())
 
@@ -109,7 +107,7 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 		chunkToSend := &pb.FileChunk{Content: buffer[:n]}
 
 		if !firstChunkSent {
-			// Send metadata with the first chunk
+
 			chunkToSend.Metadata = &pb.FileChunkMetadata{
 				TotalSize: fileInfo.Size(),
 			}
@@ -131,7 +129,6 @@ func (s *server) DownloadFile(req *pb.FileRequest, stream pb.FileTransferService
 	return nil
 }
 
-// DownloadFolderAsZip handles requests to stream a folder's content as a zip archive.
 func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransferService_DownloadFolderAsZipServer) error {
 	folderPath := req.GetPath()
 	log.Printf("DownloadFolderAsZip request received for path: '%s'", folderPath)
@@ -150,7 +147,7 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 	}
 
 	pipeReader, pipeWriter := io.Pipe()
-	firstChunkSent := false // To send metadata with the first data chunk
+	firstChunkSent := false
 
 	go func() {
 		defer pipeWriter.Close()
@@ -211,7 +208,7 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 					}
 					return errOpen
 				}
-				defer file.Close() // Close file after copying
+				defer file.Close()
 				_, errCopy := io.Copy(entryWriter, file)
 				if errCopy != nil {
 					log.Printf("Error copying file content for '%s' to zip: %v.", path, errCopy)
@@ -231,7 +228,7 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 		}
 	}()
 
-	buffer := make([]byte, 1024*64) // 64KB chunk size
+	buffer := make([]byte, 1024*64)
 	log.Printf("Starting stream of zip data for folder: '%s'", folderPath)
 
 	for {
@@ -254,11 +251,9 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 		chunkToSend := &pb.FileChunk{Content: buffer[:n]}
 
 		if !firstChunkSent {
-			// For zipped folders, the total size is not easily known beforehand without
-			// zipping to a temp file first. We send TotalSize = 0, and the client
-			// progress bar will remain indeterminate.
+
 			chunkToSend.Metadata = &pb.FileChunkMetadata{
-				TotalSize: 0, // Indicates unknown total size for client
+				TotalSize: 0,
 			}
 			log.Printf("Sending first chunk for zipped folder '%s' with metadata (TotalSize: 0 - indeterminate)", folderPath)
 			firstChunkSent = true
@@ -278,7 +273,6 @@ func (s *server) DownloadFolderAsZip(req *pb.FileRequest, stream pb.FileTransfer
 	return nil
 }
 
-// getWindowsDrives lists available drive letters on Windows.
 func getWindowsDrives() []*pb.FSNode {
 	log.Println("Detecting Windows drives...")
 	var drives []*pb.FSNode
@@ -297,7 +291,7 @@ func getWindowsDrives() []*pb.FSNode {
 
 			drives = append(drives, &pb.FSNode{
 				Path:        path,
-				Name:        path, // For drives, path and name are the same
+				Name:        path,
 				Type:        pb.FSNode_FOLDER,
 				HasChildren: hasChildren,
 				Size:        0,
@@ -310,7 +304,6 @@ func getWindowsDrives() []*pb.FSNode {
 	return drives
 }
 
-// getPosixRoot returns the root directory node for POSIX-like systems.
 func getPosixRoot() []*pb.FSNode {
 	log.Println("Returning POSIX root '/'")
 	hasChildren := false
@@ -323,7 +316,7 @@ func getPosixRoot() []*pb.FSNode {
 	return []*pb.FSNode{
 		{
 			Path:        "/",
-			Name:        "/", // For root, path and name are the same
+			Name:        "/",
 			Type:        pb.FSNode_FOLDER,
 			HasChildren: hasChildren,
 			Size:        0,
@@ -331,7 +324,6 @@ func getPosixRoot() []*pb.FSNode {
 	}
 }
 
-// listDirectoryContents reads and returns nodes for files and subdirectories.
 func listDirectoryContents(dirPath string) ([]*pb.FSNode, error) {
 	log.Printf("Listing contents of directory: %s", dirPath)
 	var nodes []*pb.FSNode
@@ -351,7 +343,7 @@ func listDirectoryContents(dirPath string) ([]*pb.FSNode, error) {
 
 		node := &pb.FSNode{
 			Path: nodePath,
-			Name: entry.Name(), // Use the entry's name
+			Name: entry.Name(),
 			Size: info.Size(),
 		}
 

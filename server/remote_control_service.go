@@ -3,18 +3,17 @@ package main
 import (
 	"io"
 	"log"
-	"strings" // For key name mapping
+	"strings"
 	"time"
 
-	"github.com/go-vgo/robotgo" // For controlling mouse/keyboard and getting screen size
+	"github.com/go-vgo/robotgo"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pb "control_grpc/gen/proto"  // Assuming this path is correct
-	"control_grpc/server/screen" // Assuming this is your local package for screen capture
+	pb "control_grpc/gen/proto"
+	"control_grpc/server/screen"
 )
 
-// GetFeed handles the bidirectional stream for remote control.
 func (s *server) GetFeed(stream pb.RemoteControlService_GetFeedServer) error {
 	serverWidth, serverHeight := robotgo.GetScreenSize()
 	log.Printf("Server screen dimensions: %dx%d", serverWidth, serverHeight)
@@ -48,7 +47,6 @@ func (s *server) GetFeed(stream pb.RemoteControlService_GetFeedServer) error {
 	return sendScreenFeed(stream, capture)
 }
 
-// getScaleFactors calculates the scaling factors.
 func getScaleFactors(serverWidth, serverHeight int, reqMsgInit *pb.FeedRequest) (float32, float32) {
 	if reqMsgInit.GetClientWidth() == 0 || reqMsgInit.GetClientHeight() == 0 {
 		log.Println("Client width or height is zero, using 1.0 for scale factors.")
@@ -59,7 +57,6 @@ func getScaleFactors(serverWidth, serverHeight int, reqMsgInit *pb.FeedRequest) 
 	return scaleX, scaleY
 }
 
-// mapFyneKeyToRobotGo converts Fyne key names to robotgo compatible key names.
 func mapFyneKeyToRobotGo(fyneKeyName string) (key string, isSpecial bool) {
 	switch fyneKeyName {
 	case "Return", "Enter":
@@ -94,10 +91,10 @@ func mapFyneKeyToRobotGo(fyneKeyName string) (key string, isSpecial bool) {
 		return "shift", true
 	case "ControlL", "ControlR":
 		return "ctrl", true
-	case "AltL", "AltR", "Menu": // Menu is often Alt
+	case "AltL", "AltR", "Menu":
 		return "alt", true
 	case "SuperL", "SuperR", "MetaL", "MetaR":
-		return "cmd", true // robotgo uses "cmd" for Super/Win/Command
+		return "cmd", true
 	case "F1":
 		return "f1", true
 	case "F2":
@@ -153,7 +150,6 @@ func mapFyneKeyToRobotGo(fyneKeyName string) (key string, isSpecial bool) {
 	}
 }
 
-// handleInputEvents processes mouse and keyboard events.
 func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32) {
 	log.Println("Input event handler goroutine started.")
 	defer log.Println("Input event handler goroutine stopped.")
@@ -178,7 +174,6 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 			fyneKeyName := reqMsg.GetKeyName()
 			keyChar := reqMsg.GetKeyCharStr()
 
-			// Prepare modifiers for robotgo
 			var robotgoModifiers []string
 			if reqMsg.GetModifierShift() {
 				robotgoModifiers = append(robotgoModifiers, "shift")
@@ -197,12 +192,9 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 
 			robotgoKeyName, _ := mapFyneKeyToRobotGo(fyneKeyName)
 
-			// log.Printf("Server: Keyboard Event: Type=%s, KeyName=%s (robotgo: %s), Char=%s, Modifiers: %+v",
-			// 	kbEventType, fyneKeyName, robotgoKeyName, keyChar, robotgoModifiers) // Debug
-
 			switch kbEventType {
 			case "keydown":
-				// Special handling for Ctrl+Alt+Del
+
 				if robotgoKeyName == "delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() {
 					log.Println("Server: Attempting to simulate Ctrl+Alt+Delete")
 					robotgo.Toggle("ctrl", "down")
@@ -212,27 +204,27 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 					robotgo.Toggle("ctrl", "up")
 				} else if robotgoKeyName != "" {
 					if len(robotgoModifiers) > 0 {
-						// Convert string modifiers to []interface{} for KeyTap's variadic argument
+
 						modsForTap := make([]interface{}, len(robotgoModifiers))
 						for i, m := range robotgoModifiers {
 							modsForTap[i] = m
 						}
 						robotgo.KeyTap(robotgoKeyName, modsForTap...)
-						// log.Printf("Server: robotgo.KeyTap(%s, %v)", robotgoKeyName, modsForTap) // Debug
+
 					} else {
-						robotgo.KeyTap(robotgoKeyName) // Simple key tap without modifiers
-						// log.Printf("Server: robotgo.KeyTap(%s)", robotgoKeyName) // Debug
+						robotgo.KeyTap(robotgoKeyName)
+
 					}
 				} else if keyChar != "" && len(robotgoModifiers) > 0 {
 					log.Printf("Server: Received keychar '%s' with modifiers but no specific robotgoKeyName. Typing char directly.", keyChar)
-					robotgo.TypeStr(keyChar) // TypeStr might not respect external modifier toggles in the same way as KeyTap.
-					// For complex modified character input, OS-level IME interaction is usually better.
+					robotgo.TypeStr(keyChar)
+
 				}
 
 			case "keychar":
 				if len(keyChar) > 0 {
 					robotgo.TypeStr(keyChar)
-					// log.Printf("Server: robotgo.TypeStr(%s)", keyChar) // Debug
+
 				}
 			default:
 				log.Printf("Unknown keyboard event type: %s", kbEventType)
@@ -243,7 +235,6 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 	}
 }
 
-// receiveInputEvents continuously receives messages from the gRPC stream.
 func receiveInputEvents(stream pb.RemoteControlService_GetFeedServer, inputEvents chan *pb.FeedRequest) {
 	log.Println("Input event receiver goroutine started.")
 	defer log.Println("Input event receiver goroutine stopped.")
@@ -267,14 +258,13 @@ func receiveInputEvents(stream pb.RemoteControlService_GetFeedServer, inputEvent
 
 		select {
 		case inputEvents <- reqMsg:
-			// Event successfully queued
+
 		default:
 			log.Println("Input event channel full, dropping event.")
 		}
 	}
 }
 
-// sendScreenFeed captures and sends screen frames to the client.
 func sendScreenFeed(stream pb.RemoteControlService_GetFeedServer, capture *screen.ScreenCapture) error {
 	log.Println("Screen feed sender goroutine started.")
 	defer log.Println("Screen feed sender goroutine stopped.")

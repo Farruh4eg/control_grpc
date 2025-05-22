@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/StackExchange/wmi"
-	"github.com/kbinani/screenshot" // For getting display dimensions
+	"github.com/kbinani/screenshot"
 )
 
 type ScreenCapture struct {
 	cmd       *exec.Cmd
 	output    io.ReadCloser
-	stderr    bytes.Buffer // Buffer to capture stderr
+	stderr    bytes.Buffer
 	restartCh chan struct{}
 	mu        sync.Mutex
 	running   bool
@@ -65,8 +65,7 @@ func (sc *ScreenCapture) start() error {
 	}
 	log.Printf("Screen capture: Attempting to use encoder: %s", currentEncoder)
 
-	// --- Get primary monitor dimensions ---
-	primaryDisplayIndex := 0 // Assuming primary display is at index 0
+	primaryDisplayIndex := 0
 	bounds := screenshot.GetDisplayBounds(primaryDisplayIndex)
 
 	captureWidth := bounds.Dx()
@@ -76,46 +75,38 @@ func (sc *ScreenCapture) start() error {
 
 	if captureWidth <= 0 || captureHeight <= 0 {
 		log.Printf("Screen capture: Invalid primary display dimensions (%dx%d). Capturing entire desktop and scaling.", captureWidth, captureHeight)
-		// Fallback to capturing whole desktop and just scaling
-		// Video filter will only contain scale and format
+
 	}
 	log.Printf("Screen capture: Primary display detected as %dx%d at offset (%d,%d)", captureWidth, captureHeight, captureOffsetX, captureOffsetY)
 
-	// Base arguments for FFmpeg
 	args := []string{
 		"-f", "gdigrab",
-		// No -video_size, -offset_x, -offset_y here for gdigrab input.
-		// gdigrab will capture the entire virtual desktop.
-		// The crop filter will select the primary monitor area from this.
+
 		"-framerate", "30",
 		"-i", "desktop",
-		"-an", // No audio
-		// Video filter chain: crop, then scale, then set pixel format
-		// If captureWidth/Height are invalid, we'll construct a simpler vf
+		"-an",
 	}
 
-	// Construct video filter string
 	vfString := ""
 	if captureWidth > 0 && captureHeight > 0 {
 		vfString = fmt.Sprintf("crop=%d:%d:%d:%d,scale=1920:1080,format=yuv420p",
 			captureWidth, captureHeight, captureOffsetX, captureOffsetY)
 	} else {
-		// Fallback if display bounds were not correctly determined
+
 		vfString = "scale=1920:1080,format=yuv420p"
 	}
 	args = append(args, "-vf", vfString)
 
 	args = append(args,
 		"-c:v", currentEncoder,
-		"-g", "60", // GOP size
+		"-g", "60",
 		"-flags", "+low_delay",
 		"-fflags", "nobuffer",
 		"-f", "mpegts",
 		"-flush_packets", "1",
-		"pipe:1", // Output to stdout
+		"pipe:1",
 	)
 
-	// Hardware-specific options
 	switch {
 	case strings.Contains(currentEncoder, "nvenc"):
 		args = append(args,
@@ -127,7 +118,7 @@ func (sc *ScreenCapture) start() error {
 			"-bufsize", "6M",
 			"-multipass", "0",
 			"-delay", "0",
-			"-zerolatency", "1", // This flag might cause issues on some FFmpeg/driver versions. Remove if problematic.
+			"-zerolatency", "1",
 			"-rc-lookahead", "0",
 			"-forced-idr", "1",
 			"-strict", "2",
@@ -156,17 +147,16 @@ func (sc *ScreenCapture) start() error {
 		args = append(args,
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
-			// "-crf", "23", // Using CRF is generally better for quality with libx264
-			// Forcing bitrate for now for consistency with other encoders
+
 			"-b:v", "3M", "-maxrate", "4M", "-bufsize", "6M",
 		)
 	default:
 		log.Printf("Screen capture: Encoder '%s' not specifically handled, using generic libx264 settings.", currentEncoder)
-		args = replaceOrAddArg(args, "-c:v", "libx264") // Ensure codec is set
+		args = replaceOrAddArg(args, "-c:v", "libx264")
 		args = append(args,
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
-			"-b:v", "2M", "-maxrate", "3M", "-bufsize", "4M", // More conservative bitrate for fallback
+			"-b:v", "2M", "-maxrate", "3M", "-bufsize", "4M",
 		)
 	}
 
@@ -186,7 +176,7 @@ func (sc *ScreenCapture) start() error {
 	if startErr = sc.cmd.Start(); startErr != nil {
 		log.Printf("Screen capture: Error starting FFmpeg: %v. Stderr: %s", startErr, sc.stderr.String())
 		if sc.output != nil {
-			io.Copy(io.Discard, sc.output) // Drain pipe
+			io.Copy(io.Discard, sc.output)
 			sc.output.Close()
 			sc.output = nil
 		}
@@ -218,17 +208,16 @@ func (sc *ScreenCapture) start() error {
 	return nil
 }
 
-// Helper function to replace or add an argument and its value
 func replaceOrAddArg(args []string, argToSet string, valueToSet string) []string {
 	found := false
 	for i, arg := range args {
 		if arg == argToSet {
-			if i+1 < len(args) { // If it's not the last argument, assume next is its value
+			if i+1 < len(args) {
 				args[i+1] = valueToSet
 				found = true
 				break
-			} else { // Argument is last, needs value appended
-				args = append(args, valueToSet) // This case might be wrong if argToSet is a flag without value
+			} else {
+				args = append(args, valueToSet)
 				found = true
 				break
 			}
@@ -339,31 +328,28 @@ func (sc *ScreenCapture) ReadFrame(buffer []byte) (int, error) {
 	n, err := currentOutput.Read(buffer)
 
 	if err != nil {
-		// Log the error, but the restart logic is primarily handled by the cmd.Wait() goroutine
+
 		log.Printf("Screen capture: Error reading frame: %v (read %d bytes)", err, n)
-		return n, io.EOF // Propagate EOF or error to caller, signaling them to stop
+		return n, io.EOF
 	}
 	return n, nil
 }
 
-// cleanupInternal is called to clean up resources. Assumes sc.mu might be held by caller or needs to be managed carefully.
 func (sc *ScreenCapture) cleanupInternal() {
-	// This function might be called from Close() (which holds lock)
-	// or from monitor() (which doesn't hold lock during this call).
-	// For simplicity, let's assume it's okay if Kill is called multiple times or on an already exited process.
+
 	if sc.cmd != nil && sc.cmd.Process != nil {
 		log.Printf("Screen capture: Attempting to kill FFmpeg process (PID: %d)...", sc.cmd.Process.Pid)
 		err := sc.cmd.Process.Kill()
 		if err != nil {
-			// Log error, but don't stop cleanup. Process might have already exited.
+
 			log.Printf("Screen capture: Error killing FFmpeg process: %v", err)
 		}
-		// sc.cmd.Wait() // The goroutine in start() is responsible for Wait()
+
 	}
 	if sc.output != nil {
 		log.Println("Screen capture: Closing output pipe...")
 		sc.output.Close()
-		sc.output = nil // Mark as closed
+		sc.output = nil
 	}
 }
 
@@ -375,19 +361,17 @@ func (sc *ScreenCapture) Close() {
 		log.Println("Screen capture: Already closed or closing.")
 		return
 	}
-	sc.running = false // Signal monitor and other parts to stop
+	sc.running = false
 
-	// Safely close restartCh
 	if sc.restartCh != nil {
 		select {
-		case <-sc.restartCh: // Drain if anything was sent, though unlikely
+		case <-sc.restartCh:
 		default:
 		}
 		close(sc.restartCh)
 		sc.restartCh = nil
 	}
 
-	// Call cleanupInternal while lock is held
 	sc.cleanupInternal()
 	sc.mu.Unlock()
 	log.Println("Screen capture: Resources cleaned up after Close call.")
