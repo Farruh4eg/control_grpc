@@ -87,13 +87,13 @@ func mapFyneKeyToRobotGo(fyneKeyName string) (key string, isSpecial bool) {
 		return "pageup", true
 	case "PageDown":
 		return "pagedown", true
-	case "ShiftL", "ShiftR":
+	case "ShiftL", "LeftShift", "ShiftR", "RightShift":
 		return "shift", true
-	case "ControlL", "ControlR":
+	case "ControlL", "LeftControl", "ControlR", "RightControl":
 		return "ctrl", true
-	case "AltL", "AltR", "Menu":
+	case "AltL", "LeftAlt", "AltR", "RightAlt", "Menu":
 		return "alt", true
-	case "SuperL", "SuperR", "MetaL", "MetaR":
+	case "SuperL", "LeftSuper", "SuperR", "RightSuper", "MetaL", "MetaR":
 		return "cmd", true
 	case "F1":
 		return "f1", true
