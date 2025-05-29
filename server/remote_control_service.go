@@ -177,67 +177,80 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 			log.Printf("Received KeyboardEvent: Type='%s', FyneKeyName='%s', KeyChar='%s', Modifiers: Shift[%t], Ctrl[%t], Alt[%t], Super[%t]",
 				kbEventType, fyneKeyName, keyChar, reqMsg.GetModifierShift(), reqMsg.GetModifierCtrl(), reqMsg.GetModifierAlt(), reqMsg.GetModifierSuper())
 
-			var robotgoModifiers []string
-			if reqMsg.GetModifierShift() {
-				robotgoModifiers = append(robotgoModifiers, "shift")
-			}
-			if reqMsg.GetModifierCtrl() {
-				robotgoModifiers = append(robotgoModifiers, "ctrl")
-			}
-			if reqMsg.GetModifierAlt() {
-				robotgoModifiers = append(robotgoModifiers, "alt")
-			}
-			if reqMsg.GetModifierSuper() {
-				if fyneKeyName != "Delete" && fyneKeyName != "Backspace" {
-					robotgoModifiers = append(robotgoModifiers, "cmd")
-				}
-			}
-
 			robotgoKeyName, isSpecial := mapFyneKeyToRobotGo(fyneKeyName)
-			log.Printf("Mapped FyneKeyName '%s' to robotgoKeyName '%s' (isSpecial: %t)", fyneKeyName, robotgoKeyName, isSpecial)
+			// Log mapped key only if FyneKeyName was present, to avoid noise for pure keychar events
+			if fyneKeyName != "" {
+				log.Printf("Mapped FyneKeyName '%s' to robotgoKeyName '%s' (isSpecial: %t)", fyneKeyName, robotgoKeyName, isSpecial)
+			}
 
-			switch kbEventType {
-			case "keydown":
-				if robotgoKeyName == "delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() {
-					log.Println("Action: Simulating Ctrl+Alt+Delete")
-					robotgo.Toggle("ctrl", "down")
-					robotgo.Toggle("alt", "down")
-					robotgo.KeyTap("delete")
-					robotgo.Toggle("alt", "up")
-					robotgo.Toggle("ctrl", "up")
-				} else if robotgoKeyName != "" {
-					if len(robotgoModifiers) > 0 {
-						log.Printf("Action: Tapping key '%s' with robotgoModifiers: %v", robotgoKeyName, robotgoModifiers)
-						modsForTap := make([]interface{}, len(robotgoModifiers))
-						for i, m := range robotgoModifiers {
-							modsForTap[i] = m
+			// Special Ctrl+Alt+Delete handling (check client side modifiers)
+			// This check should ideally be before the main kbEventType switch if it needs to override normal flow.
+			// However, it's specific to a "delete" key press, so it can be within "keydown".
+			if kbEventType == "keydown" && robotgoKeyName == "delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() {
+				log.Println("Action: Simulating Ctrl+Alt+Delete")
+				robotgo.KeyToggle("ctrl", "down")
+				robotgo.KeyToggle("alt", "down")
+				robotgo.KeyTap("delete") // delete is tapped while ctrl/alt are held
+				robotgo.KeyToggle("alt", "up")
+				robotgo.KeyToggle("ctrl", "up")
+			} else {
+				// General key event handling
+				switch kbEventType {
+				case "keydown":
+					if robotgoKeyName != "" {
+						isModifierKey := robotgoKeyName == "shift" || robotgoKeyName == "ctrl" || robotgoKeyName == "alt" || robotgoKeyName == "cmd"
+						if isModifierKey {
+							log.Printf("Action: Modifier '%s' pressed down", robotgoKeyName)
+							robotgo.KeyToggle(robotgoKeyName, "down")
+						} else if isSpecial { // For special keys like "enter", "backspace", "f1" etc.
+							log.Printf("Action: Tapping special key '%s'", robotgoKeyName)
+							robotgo.KeyTap(robotgoKeyName)
+						} else { // For regular, non-modifier, non-special keys (e.g. 'a', '1')
+							// If there are client-side modifiers active, KeyTap with those might be desired.
+							// However, the new model is to toggle modifiers separately.
+							// So, if 'A' comes (Shift + 'a'), 'shift' is toggled down, then 'a' is tapped.
+							// This tap should ideally be the character itself ('a'), not the Fyne name ('KeyA').
+							// mapFyneKeyToRobotGo already gives lowercased char for non-special keys.
+							log.Printf("Action: Tapping key '%s'", robotgoKeyName)
+							robotgo.KeyTap(robotgoKeyName)
 						}
-						robotgo.KeyTap(robotgoKeyName, modsForTap...)
+					} else if keyChar != "" {
+						// This handles cases where Fyne sends a keyChar directly for a keydown,
+						// e.g., for some non-US keyboard layouts or complex characters not mapped by fyneKeyName.
+						// It also covers simple characters if mapFyneKeyToRobotGo returns "" for them for some reason.
+						log.Printf("Action: Typing character from keyChar on keydown '%s'", keyChar)
+						robotgo.TypeStr(keyChar)
 					} else {
-						log.Printf("Action: Tapping key '%s'", robotgoKeyName)
-						robotgo.KeyTap(robotgoKeyName)
+						log.Printf("Action: Ignoring keydown event with empty robotgoKeyName and KeyChar.")
 					}
-				} else if keyChar != "" && len(robotgoModifiers) > 0 {
-					// This case might be redundant if mapFyneKeyToRobotGo handles all typeable chars correctly,
-					// but logging it helps understand if it's ever hit.
-					log.Printf("Action: Typing character '%s' (modifier array was non-empty, but no specific robotgoKeyName)", keyChar)
-					robotgo.TypeStr(keyChar)
-				} else if keyChar != "" { // Added this condition for keychar events that are not special keys
-					log.Printf("Action: Typing character '%s'", keyChar)
-					robotgo.TypeStr(keyChar)
-				} else {
-					log.Printf("Action: Ignoring event with empty FyneKeyName/robotgoKeyName and KeyChar for keydown.")
-				}
 
-			case "keychar":
-				if len(keyChar) > 0 {
-					log.Printf("Action: Typing character '%s'", keyChar)
-					robotgo.TypeStr(keyChar)
-				} else {
-					log.Printf("Action: Ignoring keychar event with empty KeyChar.")
+				case "keyup":
+					if robotgoKeyName != "" {
+						isModifierKey := robotgoKeyName == "shift" || robotgoKeyName == "ctrl" || robotgoKeyName == "alt" || robotgoKeyName == "cmd"
+						if isModifierKey {
+							log.Printf("Action: Modifier '%s' released", robotgoKeyName)
+							robotgo.KeyToggle(robotgoKeyName, "up")
+						} else {
+							// Non-modifier keyup events are generally ignored because KeyTap handles press & release.
+							// Logging it for now to observe behavior.
+							log.Printf("Action: Ignoring non-modifier keyup for '%s' (handled by KeyTap on keydown)", robotgoKeyName)
+						}
+					} else {
+						log.Printf("Action: Ignoring keyup event with empty robotgoKeyName.")
+					}
+
+				case "keychar":
+					// This event type is specifically for when Fyne has determined the character to be typed,
+					// often after processing dead keys or IMEs.
+					if keyChar != "" {
+						log.Printf("Action: Typing character from keychar event '%s'", keyChar)
+						robotgo.TypeStr(keyChar)
+					} else {
+						log.Printf("Action: Ignoring keychar event with empty KeyChar.")
+					}
+				default:
+					log.Printf("Action: Unhandled keyboard event type: '%s'", kbEventType)
 				}
-			default:
-				log.Printf("Action: Unhandled keyboard event type: %s", kbEventType)
 			}
 		default:
 			log.Printf("Unknown input event message type: %s", reqMsg.Message)
