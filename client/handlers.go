@@ -49,22 +49,15 @@ func (mo *mouseOverlay) FocusLost() {
 }
 
 func (mo *mouseOverlay) TypedKey(ev *fyne.KeyEvent) {
-	// Determine modifier states
-	isShift := (ev.Modifier & fyne.KeyModifierShift) != 0
-	isCtrl := (ev.Modifier & fyne.KeyModifierControl) != 0
-	isAlt := (ev.Modifier & fyne.KeyModifierAlt) != 0
-	// Use KeyModifierShortcut for platform-agnostic shortcut (Ctrl/Cmd)
-	// and KeyModifierSuper for explicit Super/Win/Cmd key.
-	isSuper := (ev.Modifier & fyne.KeyModifierSuper) != 0 || (ev.Modifier & desktop.KeyModifierShortcutDefault) != 0
+	// Modifier fields are intentionally not set here as ev.Modifier is not available.
+	// They will default to false. Modifier handling will be via TypedShortcut.
 
 	req := &pb.FeedRequest{
 		Message:             "keyboard_event",
 		KeyboardEventType:   "keydown", // Fyne's TypedKey is for key down
 		KeyName:             string(ev.Name),
-		ModifierShift:       isShift,
-		ModifierCtrl:        isCtrl,
-		ModifierAlt:         isAlt,
-		ModifierSuper:       isSuper,
+		// ModifierShift, ModifierCtrl, ModifierAlt, ModifierSuper are omitted
+		// and will default to false in the protobuf message.
 		Timestamp:           time.Now().UnixNano(),
 		ClientWidth:         1920, // Assuming a fixed virtual resolution for now
 		ClientHeight:        1080, // Assuming a fixed virtual resolution for now
@@ -97,7 +90,42 @@ func (mo *mouseOverlay) TypedRune(r rune) {
 }
 
 func (mo *mouseOverlay) TypedShortcut(sc fyne.Shortcut) {
+	ks, ok := sc.(fyne.KeyboardShortcut)
+	if !ok {
+		log.Println("Received shortcut is not a fyne.KeyboardShortcut:", sc.ShortcutName())
+		return
+	}
 
+	// Determine modifier states from ks.Mod()
+	// Fyne's shortcut system means ks.Mod() will have the correct bits set,
+	// e.g., KeyModifierSuper for Cmd on macOS if it's part of the shortcut.
+	pbModifierShift := (ks.Mod() & fyne.KeyModifierShift) != 0
+	pbModifierCtrl := (ks.Mod() & fyne.KeyModifierControl) != 0
+	pbModifierAlt := (ks.Mod() & fyne.KeyModifierAlt) != 0
+	pbModifierSuper := (ks.Mod() & fyne.KeyModifierSuper) != 0
+
+	req := &pb.FeedRequest{
+		Message:           "keyboard_event",
+		KeyboardEventType: "keydown", // Shortcuts are treated as keydown events
+		KeyName:           string(ks.Key()),
+		ModifierShift:     pbModifierShift,
+		ModifierCtrl:      pbModifierCtrl,
+		ModifierAlt:       pbModifierAlt,
+		ModifierSuper:     pbModifierSuper,
+		Timestamp:         time.Now().UnixNano(),
+		ClientWidth:       1920, // Assuming a fixed virtual resolution for now
+		ClientHeight:      1080, // Assuming a fixed virtual resolution for now
+	}
+
+	log.Printf("Sending shortcut event: Key='%s', Shift[%t], Ctrl[%t], Alt[%t], Super[%t]",
+		ks.Key(), pbModifierShift, pbModifierCtrl, pbModifierAlt, pbModifierSuper)
+
+	select {
+	case mo.inputEventsChan <- req:
+		// Event sent successfully
+	default:
+		log.Println("Keyboard shortcut event dropped (inputEventsChan channel full)")
+	}
 }
 
 func (mo *mouseOverlay) requestFocus() {
