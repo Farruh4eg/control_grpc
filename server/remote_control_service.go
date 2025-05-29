@@ -190,44 +190,78 @@ func handleInputEvents(inputEvents chan *pb.FeedRequest, scaleX, scaleY float32)
 				}
 			}
 
-			robotgoKeyName, _ := mapFyneKeyToRobotGo(fyneKeyName)
+			robotgoKeyName, isSpecialMappedKey := mapFyneKeyToRobotGo(fyneKeyName)
+
+			log.Printf("Server: KeyboardEvent: Type='%s', FyneKeyName='%s', KeyChar='%s', RobotgoKeyName='%s' (isSpecial: %t), Modifiers: Shift[%t], Ctrl[%t], Alt[%t], Super[%t] (robotgoModifiers: %v)",
+				kbEventType, fyneKeyName, keyChar, robotgoKeyName, isSpecialMappedKey,
+				reqMsg.GetModifierShift(), reqMsg.GetModifierCtrl(), reqMsg.GetModifierAlt(), reqMsg.GetModifierSuper(), robotgoModifiers)
 
 			switch kbEventType {
 			case "keydown":
-
-				if robotgoKeyName == "delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() {
-					log.Println("Server: Attempting to simulate Ctrl+Alt+Delete")
+				// Special case: Ctrl+Alt+Delete
+				if fyneKeyName == "Delete" && reqMsg.GetModifierCtrl() && reqMsg.GetModifierAlt() { // Check fyneKeyName for Delete
+					log.Println("Server: KeyDown: Simulating Ctrl+Alt+Delete.")
 					robotgo.Toggle("ctrl", "down")
 					robotgo.Toggle("alt", "down")
-					robotgo.KeyTap("delete")
+					robotgo.KeyTap("delete") // robotgoKeyName for Delete is "delete"
 					robotgo.Toggle("alt", "up")
 					robotgo.Toggle("ctrl", "up")
 				} else if robotgoKeyName != "" {
+					// Primary path: KeyTap with robotgoKeyName (for special keys like Enter, F1, or character keys like 'a')
+					log.Printf("Server: KeyDown: Tapping key '%s' with modifiers: %v", robotgoKeyName, robotgoModifiers)
 					if len(robotgoModifiers) > 0 {
-
 						modsForTap := make([]interface{}, len(robotgoModifiers))
 						for i, m := range robotgoModifiers {
 							modsForTap[i] = m
 						}
 						robotgo.KeyTap(robotgoKeyName, modsForTap...)
-
 					} else {
 						robotgo.KeyTap(robotgoKeyName)
-
 					}
-				} else if keyChar != "" && len(robotgoModifiers) > 0 {
-					log.Printf("Server: Received keychar '%s' with modifiers but no specific robotgoKeyName. Typing char directly.", keyChar)
-					robotgo.TypeStr(keyChar)
-
+				} else if keyChar != "" {
+					// Fallback: robotgoKeyName is empty, but keyChar is present.
+					// This path should ideally not be hit often if mapFyneKeyToRobotGo is comprehensive
+					// and client sends fyneKeyName for keydown events.
+					// Client currently sends empty keyChar for keydown.
+					if reqMsg.GetModifierCtrl() || reqMsg.GetModifierAlt() || reqMsg.GetModifierSuper() {
+						log.Printf("Server: KeyDown: robotgoKeyName is empty, but keyChar '%s' present with control modifiers. Attempting KeyTap with keyChar and modifiers: %v", keyChar, robotgoModifiers)
+						// Note: keyChar might need mapping if it's not a single character robotgo understands for KeyTap.
+						// For now, assume keyChar is suitable for KeyTap if it gets here.
+						if len(robotgoModifiers) > 0 {
+							modsForTap := make([]interface{}, len(robotgoModifiers))
+							for i, m := range robotgoModifiers {
+								modsForTap[i] = m
+							}
+							robotgo.KeyTap(keyChar, modsForTap...)
+						} else {
+							robotgo.KeyTap(keyChar) // Should not happen if control modifiers are checked above
+						}
+					} else {
+						// No control modifiers, but keyChar is present and robotgoKeyName was empty.
+						log.Printf("Server: KeyDown: robotgoKeyName is empty, keyChar '%s' present without control modifiers. Attempting TypeStr.", keyChar)
+						robotgo.TypeStr(keyChar)
+					}
+				} else {
+					log.Printf("Server: KeyDown: Unhandled event. robotgoKeyName and keyChar are both empty. FyneKeyName: '%s'", fyneKeyName)
 				}
 
 			case "keychar":
-				if len(keyChar) > 0 {
-					robotgo.TypeStr(keyChar)
-
+				if keyChar != "" {
+					// If Ctrl, Alt, or Super modifiers are active, it's likely a shortcut that should have been handled by "keydown".
+					// Fyne might send both TypedKey and TypedRune. We only want to type if it's plain character input.
+					// Shift is okay as it's part of the character (e.g., 'S' vs 's').
+					if reqMsg.GetModifierCtrl() || reqMsg.GetModifierAlt() || reqMsg.GetModifierSuper() {
+						log.Printf("Server: KeyChar: Received char '%s', but Ctrl/Alt/Super modifier was active. Ignoring char for typing to prevent interference with shortcuts.", keyChar)
+					} else {
+						log.Printf("Server: KeyChar: Typing char '%s'. Modifiers (Shift potentially included in char): Shift[%t] Ctrl[%t] Alt[%t] Super[%t]",
+							keyChar, reqMsg.GetModifierShift(), reqMsg.GetModifierCtrl(), reqMsg.GetModifierAlt(), reqMsg.GetModifierSuper())
+						robotgo.TypeStr(keyChar)
+					}
+				} else {
+					log.Printf("Server: KeyChar: Received event but keyChar is empty.")
 				}
 			default:
-				log.Printf("Unknown keyboard event type: %s", kbEventType)
+				log.Printf("Server: Unknown keyboard event type: '%s'", kbEventType)
 			}
 		default:
 			log.Printf("Unknown input event message type: %s", reqMsg.Message)

@@ -49,11 +49,51 @@ func (mo *mouseOverlay) FocusLost() {
 }
 
 func (mo *mouseOverlay) TypedKey(ev *fyne.KeyEvent) {
+	// Determine modifier states
+	isShift := (ev.Modifier & fyne.KeyModifierShift) != 0
+	isCtrl := (ev.Modifier & fyne.KeyModifierControl) != 0
+	isAlt := (ev.Modifier & fyne.KeyModifierAlt) != 0
+	// Use KeyModifierShortcut for platform-agnostic shortcut (Ctrl/Cmd)
+	// and KeyModifierSuper for explicit Super/Win/Cmd key.
+	isSuper := (ev.Modifier & fyne.KeyModifierSuper) != 0 || (ev.Modifier & desktop.KeyModifierShortcutDefault) != 0
 
+	req := &pb.FeedRequest{
+		Message:             "keyboard_event",
+		KeyboardEventType:   "keydown", // Fyne's TypedKey is for key down
+		KeyName:             string(ev.Name),
+		ModifierShift:       isShift,
+		ModifierCtrl:        isCtrl,
+		ModifierAlt:         isAlt,
+		ModifierSuper:       isSuper,
+		Timestamp:           time.Now().UnixNano(),
+		ClientWidth:         1920, // Assuming a fixed virtual resolution for now
+		ClientHeight:        1080, // Assuming a fixed virtual resolution for now
+	}
+
+	select {
+	case mo.inputEventsChan <- req:
+		// log.Printf("Sent key event: %s", ev.Name) // Optional: for debugging
+	default:
+		log.Println("Keyboard event (TypedKey) dropped (inputEventsChan channel full)")
+	}
 }
 
 func (mo *mouseOverlay) TypedRune(r rune) {
+	req := &pb.FeedRequest{
+		Message:           "keyboard_event",
+		KeyboardEventType: "keychar",
+		KeyCharStr:        string(r),
+		Timestamp:         time.Now().UnixNano(),
+		ClientWidth:       1920, // Assuming a fixed virtual resolution for now
+		ClientHeight:      1080, // Assuming a fixed virtual resolution for now
+	}
 
+	select {
+	case mo.inputEventsChan <- req:
+		// log.Printf("Sent rune event: %c", r) // Optional: for debugging
+	default:
+		log.Println("Keyboard event (TypedRune) dropped (inputEventsChan channel full)")
+	}
 }
 
 func (mo *mouseOverlay) TypedShortcut(sc fyne.Shortcut) {
