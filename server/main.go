@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	pb "control_grpc/gen/proto"
+	pb "control_grpc/gen/proto" // Make sure this path is correct for your project
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -52,11 +52,12 @@ type server struct {
 }
 
 var (
-	portFlag            = flag.Int("port", 32212, "The server port for direct gRPC connections")
-	enableRelay         = flag.Bool("relay", false, "Enable relay mode to connect through a relay server")
-	relayServerAddr     = flag.String("relayServer", "localhost:34000", "Address of the relay server's control port (IP:PORT)")
-	hostIDFlag          = flag.String("hostID", "auto", "Unique ID for this host. 'auto' for random generation.")
-	sessionPasswordFlag = flag.String("sessionPassword", "", "HASHED password to protect this host session when using relay (optional).")
+	portFlag             = flag.Int("port", 32212, "The server port for direct gRPC connections")
+	enableRelay          = flag.Bool("relay", false, "Enable relay mode to connect through a relay server")
+	relayServerAddr      = flag.String("relayServer", "localhost:34000", "Address of the relay server's control port (IP:PORT)")
+	hostIDFlag           = flag.String("hostID", "auto", "Unique ID for this host. 'auto' for random generation.")
+	sessionPasswordFlag  = flag.String("sessionPassword", "", "HASHED password to protect this host session when using relay (optional).")
+	localRelaxedAuthFlag = flag.Bool("localRelaxedAuth", false, "Enable relaxed client certificate authentication for direct local connections.")
 
 	fyneApp             fyne.App
 	fyneWindow          fyne.Window
@@ -102,6 +103,68 @@ func tryGracefulShutdown(s *server, timeout time.Duration) bool {
 	return true
 }
 
+// getDisplayableListenAddresses iterates through network interfaces to find suitable
+// non-loopback IP addresses for display.
+func getDisplayableListenAddresses(port int) []string {
+	var addresses []string
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("WARN: [NetInfo] Could not get network interfaces: %v", err)
+		return addresses // empty
+	}
+
+	var ipv4Addresses []string
+	var ipv6Addresses []string
+
+	for _, i := range ifaces {
+		if (i.Flags&net.FlagUp == 0) || (i.Flags&net.FlagLoopback != 0) {
+			continue
+		}
+
+		addrs, err := i.Addrs()
+		if err != nil {
+			log.Printf("WARN: [NetInfo] Could not get addresses for interface %s: %v", i.Name, err)
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			if ip.To4() != nil {
+				if !ip.IsLinkLocalUnicast() {
+					ipv4Addresses = append(ipv4Addresses, fmt.Sprintf("%s:%d", ip.String(), port))
+				}
+			} else if len(ip) == net.IPv6len {
+				isULA := (ip[0] == 0xfc || ip[0] == 0xfd)
+
+				if ip.IsGlobalUnicast() || isULA {
+					if !ip.IsLinkLocalUnicast() {
+						ipv6Addresses = append(ipv6Addresses, fmt.Sprintf("[%s]:%d", ip.String(), port))
+					}
+				}
+			}
+		}
+	}
+	return append(ipv4Addresses, ipv6Addresses...)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -123,14 +186,35 @@ func main() {
 		log.Printf("INFO: Session password protection is DISABLED.")
 	}
 
+	if *localRelaxedAuthFlag {
+		log.Printf("INFO: Relaxed local client authentication is ENABLED.")
+	} else {
+		log.Printf("INFO: Relaxed local client authentication is DISABLED.")
+	}
+
 	localGrpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", *portFlag))
 	if err != nil {
 		log.Fatalf("FATAL: Failed to listen on port %d: %v", *portFlag, err)
 	}
 	s.localGrpcAddr = localGrpcListener.Addr().String()
-	log.Printf("INFO: Local gRPC server will listen on %s", s.localGrpcAddr)
+	log.Printf("INFO: Local gRPC server initially bound to %s (port %d)", s.localGrpcAddr, *portFlag)
 
-	tlsCredentials, err := loadTLSCredentialsFromEmbed()
+	displayableListenAddrs := getDisplayableListenAddresses(*portFlag)
+	primaryListenAddrDisplay := s.localGrpcAddr
+	allListenAddrLog := s.localGrpcAddr
+
+	if len(displayableListenAddrs) > 0 {
+		primaryListenAddrDisplay = displayableListenAddrs[0]
+		if len(displayableListenAddrs) > 1 {
+			primaryListenAddrDisplay += " (and others)"
+		}
+		allListenAddrLog = strings.Join(displayableListenAddrs, " | ")
+		log.Printf("INFO: Server detected usable direct connection addresses: %s", allListenAddrLog)
+	} else {
+		log.Printf("INFO: No specific non-loopback IP addresses found. Server listening on all interfaces at %s", s.localGrpcAddr)
+	}
+
+	tlsCredentials, err := loadTLSCredentialsFromEmbed(*localRelaxedAuthFlag)
 	if err != nil {
 		log.Fatalf("FATAL: Cannot load TLS credentials: %v", err)
 	}
@@ -150,12 +234,12 @@ func main() {
 	pb.RegisterTerminalServiceServer(grpcServer, s)
 	reflection.Register(grpcServer)
 
-	fyneApp = app.New()
+	fyneApp = app.NewWithID("com.example.grpcserver.v2")
 	fyneWindow = fyneApp.NewWindow("gRPC Server - Initializing...")
 
-	serverStatusLabel = widget.NewLabel(fmt.Sprintf("Direct gRPC: Listening on %s", s.localGrpcAddr))
+	serverStatusLabel = widget.NewLabel(fmt.Sprintf("Direct gRPC: Listening on %s", primaryListenAddrDisplay))
 	serverStatusLabel.Alignment = fyne.TextAlignCenter
-	hostIDDisplayLabel = widget.NewLabel("Determining Host ID...")
+	hostIDDisplayLabel = widget.NewLabel("Determining Host ID / Direct Addresses...")
 	hostIDDisplayLabel.Wrapping = fyne.TextWrapWord
 	hostIDDisplayLabel.Alignment = fyne.TextAlignCenter
 	passwordStatusText := "Password: None"
@@ -167,24 +251,41 @@ func main() {
 	relayStatusLabel = widget.NewLabel("Relay: Disabled")
 	relayStatusLabel.Alignment = fyne.TextAlignCenter
 
+	relaxedAuthStatusText := "Local Auth: Strict (Cert Required)"
+	if *localRelaxedAuthFlag {
+		relaxedAuthStatusText = "Local Auth: Relaxed (Cert If Given)"
+	}
+	relaxedAuthStatusLabel := widget.NewLabel(relaxedAuthStatusText)
+	relaxedAuthStatusLabel.Alignment = fyne.TextAlignCenter
+
 	if *enableRelay {
 		hostIDDisplayLabel.SetText("Registering with Relay server...")
 		relayStatusLabel.SetText(fmt.Sprintf("Relay: Connecting to %s...", *relayServerAddr))
 	} else {
 		s.currentRelayHostID = initialHostID
-		hostIDDisplayLabel.SetText(fmt.Sprintf("Your Host ID: %s\n(Share this for direct connection)", s.currentRelayHostID))
-		fyneWindow.SetTitle(fmt.Sprintf("gRPC Server - Host ID: %s (Direct)", s.currentRelayHostID))
-		fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, s.currentRelayHostID)
-		log.Printf("INFO: Effective Host ID (direct mode): %s", s.currentRelayHostID)
+		var directConnectDisplay string
+		if len(displayableListenAddrs) == 0 {
+			directConnectDisplay = fmt.Sprintf("Connect directly (listening on %s)", s.localGrpcAddr)
+		} else if len(displayableListenAddrs) == 1 {
+			directConnectDisplay = fmt.Sprintf("Connect directly via: %s", displayableListenAddrs[0])
+		} else {
+			displayLimit := min(len(displayableListenAddrs), 3)
+			otherIPs := strings.Join(displayableListenAddrs[1:displayLimit], ", ")
+			if len(displayableListenAddrs) > displayLimit {
+				otherIPs += ", ..."
+			}
+			directConnectDisplay = fmt.Sprintf("Connect directly via: %s (or other local IPs like %s)", displayableListenAddrs[0], otherIPs)
+		}
+		hostIDDisplayLabel.SetText(directConnectDisplay)
+		fyneWindow.SetTitle(fmt.Sprintf("gRPC Server (Direct Mode) - Port %d", *portFlag))
+		fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, initialHostID)
+		log.Printf("INFO: Server in direct mode. Internal Host ID: %s. %s", initialHostID, directConnectDisplay)
 	}
 
 	quitButton := widget.NewButton("Shutdown Server", func() {
-		log.Println("INFO: Shutdown button clicked. Initiating server shutdown sequence...")
-
+		log.Println("INFO: Shutdown button clicked.")
 		serverStatusLabel.SetText("Server shutting down...")
-
 		if tryGracefulShutdown(s, shutdownTimeout) {
-
 		}
 		log.Println("INFO: Quitting Fyne application via button.")
 		fyneApp.Quit()
@@ -195,25 +296,22 @@ func main() {
 		passwordStatusLabel,
 		serverStatusLabel,
 		relayStatusLabel,
+		relaxedAuthStatusLabel,
 		quitButton,
 	))
-	fyneWindow.Resize(fyne.NewSize(500, 280))
+	fyneWindow.Resize(fyne.NewSize(500, 310))
 
 	fyneWindow.SetOnClosed(func() {
-		log.Println("INFO: Fyne window closed by user. Initiating server shutdown sequence...")
-
+		log.Println("INFO: Fyne window closed by user.")
 		tryGracefulShutdown(s, shutdownTimeout)
-
-		log.Println("INFO: Server shutdown process initiated from OnClosed. Fyne app will now quit.")
+		log.Println("INFO: Server shutdown process initiated from OnClosed.")
 	})
 
 	go func() {
-		log.Printf("INFO: gRPC Server starting for direct connections at %s", s.localGrpcAddr)
+		log.Printf("INFO: gRPC Server starting. Primary display: %s. All found: %s", primaryListenAddrDisplay, allListenAddrLog)
 		if err := grpcServer.Serve(localGrpcListener); err != nil {
-
 			log.Printf("INFO: grpcServer.Serve completed/exited: %v", err)
-			if fyneApp != nil && serverStatusLabel != nil && !strings.Contains(err.Error(), "closed") {
-
+			if fyneApp != nil && serverStatusLabel != nil && !strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "server closed") {
 				fyneApp.SendNotification(&fyne.Notification{
 					Title:   "gRPC Server Error",
 					Content: fmt.Sprintf("gRPC server issue: %v", err),
@@ -262,144 +360,144 @@ func (s *server) manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localIniti
 			continue
 		}
 		log.Printf("INFO: [Relay] Connected to relay control server: %s", controlConn.RemoteAddr())
-		break
-	}
-	defer controlConn.Close()
 
-	registerCmd := fmt.Sprintf("REGISTER_HOST %s\n", localInitialIDHint)
-	_, err = fmt.Fprint(controlConn, registerCmd)
-	if err != nil {
-		log.Printf("ERROR: [Relay] Failed to send REGISTER_HOST command: %v", err)
-		if relayStatusLabel != nil {
-			relayStatusLabel.SetText("Relay: Registration command failed.")
-			relayStatusLabel.Refresh()
-		}
-		return
-	}
-	log.Printf("INFO: [Relay] Sent: %s", strings.TrimSpace(registerCmd))
-	if relayStatusLabel != nil {
-		relayStatusLabel.SetText("Relay: Sent registration. Waiting for ID...")
-		relayStatusLabel.Refresh()
-	}
-
-	reader := bufio.NewReader(controlConn)
-	for {
-		response, err := reader.ReadString('\n')
+		registerCmd := fmt.Sprintf("REGISTER_HOST %s\n", localInitialIDHint)
+		_, err = fmt.Fprint(controlConn, registerCmd)
 		if err != nil {
-			if err == io.EOF {
-				log.Printf("INFO: [Relay] Control connection to relay server closed (EOF) for Host ID '%s'. Reconnecting...", s.currentRelayHostID)
-			} else {
-				log.Printf("ERROR: [Relay] Error reading from relay control connection for Host ID '%s': %v. Reconnecting...", s.currentRelayHostID, err)
+			log.Printf("ERROR: [Relay] Failed to send REGISTER_HOST command: %v. Closing connection and retrying.", err)
+			if relayStatusLabel != nil {
+				relayStatusLabel.SetText("Relay: Registration command failed.")
+				relayStatusLabel.Refresh()
 			}
 			controlConn.Close()
-			go s.manageRelayRegistrationAndTunnels(relayCtrlAddrFull, localInitialIDHint, localGrpcSvcAddr)
-			return
-		}
-
-		response = strings.TrimSpace(response)
-		log.Printf("INFO: [Relay] Received from relay (current/potential Host ID '%s'): %s", s.currentRelayHostID, response)
-		parts := strings.Fields(response)
-		if len(parts) == 0 {
+			time.Sleep(5 * time.Second)
 			continue
 		}
-		command := parts[0]
+		log.Printf("INFO: [Relay] Sent: %s", strings.TrimSpace(registerCmd))
+		if relayStatusLabel != nil {
+			relayStatusLabel.SetText("Relay: Sent registration. Waiting for ID...")
+			relayStatusLabel.Refresh()
+		}
 
-		switch command {
-		case "HOST_REGISTERED":
-			if len(parts) < 2 {
-				log.Printf("ERROR: [Relay] Invalid HOST_REGISTERED response: %s", response)
+		reader := bufio.NewReader(controlConn)
+		for {
+			response, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					log.Printf("INFO: [Relay] Control connection to relay server closed (EOF) for Host ID '%s'. Will attempt to reconnect.", s.currentRelayHostID)
+				} else {
+					log.Printf("ERROR: [Relay] Error reading from relay control connection for Host ID '%s': %v. Will attempt to reconnect.", s.currentRelayHostID, err)
+				}
+				controlConn.Close()
+				goto EndReadLoop
+			}
+
+			response = strings.TrimSpace(response)
+			log.Printf("INFO: [Relay] Received from relay (current/potential Host ID '%s'): %s", s.currentRelayHostID, response)
+			parts := strings.Fields(response)
+			if len(parts) == 0 {
 				continue
 			}
-			assignedID := parts[1]
-			s.currentRelayHostID = assignedID
-			log.Printf("INFO: [Relay] Successfully registered with relay server. Assigned Host ID: %s", s.currentRelayHostID)
-			fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, s.currentRelayHostID)
-			log.Printf("INFO: Effective Host ID (relay mode): %s", s.currentRelayHostID)
+			command := parts[0]
 
-			if hostIDDisplayLabel != nil {
-				hostIDDisplayLabel.SetText(fmt.Sprintf("Your Relay Host ID: %s\n(Share this with clients)", s.currentRelayHostID))
-				hostIDDisplayLabel.Refresh()
-			}
-			if fyneWindow != nil {
-				fyneWindow.SetTitle(fmt.Sprintf("gRPC Server - Host ID: %s (Relay)", s.currentRelayHostID))
-			}
-			if relayStatusLabel != nil {
-				relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting for clients...", s.currentRelayHostID))
-				relayStatusLabel.Refresh()
-			}
+			switch command {
+			case "HOST_REGISTERED":
+				if len(parts) < 2 {
+					log.Printf("ERROR: [Relay] Invalid HOST_REGISTERED response: %s", response)
+					continue
+				}
+				assignedID := parts[1]
+				s.currentRelayHostID = assignedID
+				log.Printf("INFO: [Relay] Successfully registered with relay server. Assigned Host ID: %s", s.currentRelayHostID)
+				fmt.Fprintf(os.Stdout, "%s%s\n", effectiveHostIDPrefix, s.currentRelayHostID)
+				log.Printf("INFO: Effective Host ID (relay mode): %s", s.currentRelayHostID)
 
-		case "VERIFY_PASSWORD_REQUEST":
-			log.Printf("DEBUG: [Relay] Received VERIFY_PASSWORD_REQUEST: %s", response)
-			var plainTextPasswordAttempt string
-			requestToken := ""
+				if hostIDDisplayLabel != nil {
+					hostIDDisplayLabel.SetText(fmt.Sprintf("Your Relay Host ID: %s\n(Share this with clients)", s.currentRelayHostID))
+					hostIDDisplayLabel.Refresh()
+				}
+				if fyneWindow != nil {
+					fyneWindow.SetTitle(fmt.Sprintf("gRPC Server - Host ID: %s (Relay)", s.currentRelayHostID))
+				}
+				if relayStatusLabel != nil {
+					relayStatusLabel.SetText(fmt.Sprintf("Relay: Registered as '%s'. Waiting for clients...", s.currentRelayHostID))
+					relayStatusLabel.Refresh()
+				}
 
-			if len(parts) >= 2 {
-				requestToken = parts[1]
-			} else {
-				log.Printf("ERROR: [Relay] Invalid VERIFY_PASSWORD_REQUEST (missing token): %s", response)
-				continue
-			}
+			case "VERIFY_PASSWORD_REQUEST":
+				log.Printf("DEBUG: [Relay] Received VERIFY_PASSWORD_REQUEST: %s", response)
+				var plainTextPasswordAttempt string
+				requestToken := ""
 
-			if len(parts) >= 3 {
-				plainTextPasswordAttempt = strings.Join(parts[2:], " ")
-			} else {
-				plainTextPasswordAttempt = ""
-				log.Printf("DEBUG: [Relay] No password string provided in VERIFY_PASSWORD_REQUEST for token %s.", requestToken)
-			}
-			log.Printf("DEBUG: [Relay] Token: '%s', Password Attempt (plain text): '%s', Stored Hash: '%s'", requestToken, plainTextPasswordAttempt, s.sessionPasswordHash)
+				if len(parts) >= 2 {
+					requestToken = parts[1]
+				} else {
+					log.Printf("ERROR: [Relay] Invalid VERIFY_PASSWORD_REQUEST (missing token): %s", response)
+					continue
+				}
+				if len(parts) >= 3 {
+					plainTextPasswordAttempt = strings.Join(parts[2:], " ")
+				} else {
+					plainTextPasswordAttempt = ""
+					log.Printf("DEBUG: [Relay] No password string provided in VERIFY_PASSWORD_REQUEST for token %s.", requestToken)
+				}
+				log.Printf("DEBUG: [Relay] Token: '%s', Password Attempt (plain text): '%s', Stored Hash: '%s'", requestToken, plainTextPasswordAttempt, s.sessionPasswordHash)
 
-			isValid := false
-			if s.sessionPasswordHash == "" {
-				log.Printf("INFO: [Relay] Password verification for token '%s'. Host has no password. Granting access.", requestToken)
-				isValid = true
-			} else {
-				errCompare := bcrypt.CompareHashAndPassword([]byte(s.sessionPasswordHash), []byte(plainTextPasswordAttempt))
-				if errCompare == nil {
-					log.Printf("INFO: [Relay] Password verification for token '%s'. Password MATCHED.", requestToken)
+				isValid := false
+				if s.sessionPasswordHash == "" {
+					log.Printf("INFO: [Relay] Password verification for token '%s'. Host has no password set. Granting access.", requestToken)
 					isValid = true
 				} else {
-					log.Printf("WARN: [Relay] Password verification for token '%s'. Password MISMATCH (attempt: '%s', err: %v). Denying access.", requestToken, plainTextPasswordAttempt, errCompare)
-					isValid = false
+					errCompare := bcrypt.CompareHashAndPassword([]byte(s.sessionPasswordHash), []byte(plainTextPasswordAttempt))
+					if errCompare == nil {
+						log.Printf("INFO: [Relay] Password verification for token '%s'. Password MATCHED.", requestToken)
+						isValid = true
+					} else {
+						log.Printf("WARN: [Relay] Password verification for token '%s'. Password MISMATCH (attempt: '%s', err: %v). Denying access.", requestToken, plainTextPasswordAttempt, errCompare)
+						isValid = false
+					}
 				}
-			}
+				respCmd := fmt.Sprintf("VERIFY_PASSWORD_RESPONSE %s %t\n", requestToken, isValid)
+				_, errSend := fmt.Fprint(controlConn, respCmd)
+				if errSend != nil {
+					log.Printf("ERROR: [Relay] Failed to send VERIFY_PASSWORD_RESPONSE for token %s: %v", requestToken, errSend)
+				} else {
+					log.Printf("INFO: [Relay] Sent to relay: %s", strings.TrimSpace(respCmd))
+				}
 
-			respCmd := fmt.Sprintf("VERIFY_PASSWORD_RESPONSE %s %t\n", requestToken, isValid)
-			_, errSend := fmt.Fprint(controlConn, respCmd)
-			if errSend != nil {
-				log.Printf("ERROR: [Relay] Failed to send VERIFY_PASSWORD_RESPONSE for token %s: %v", requestToken, errSend)
-			} else {
-				log.Printf("INFO: [Relay] Sent to relay: %s", strings.TrimSpace(respCmd))
-			}
+			case "CREATE_TUNNEL":
+				if len(parts) < 3 {
+					log.Printf("ERROR: [Relay] Invalid CREATE_TUNNEL command for Host ID '%s': %s", s.currentRelayHostID, response)
+					continue
+				}
+				if s.currentRelayHostID == "" {
+					log.Printf("ERROR: [Relay] Received CREATE_TUNNEL before host ID was registered: %s. Ignoring.", response)
+					continue
+				}
+				relayDynamicPortStr := parts[1]
+				sessionToken := parts[2]
+				log.Printf("INFO: [Relay] Received CREATE_TUNNEL for Host ID '%s', session token %s, relay dynamic port %s", s.currentRelayHostID, sessionToken, relayDynamicPortStr)
 
-		case "CREATE_TUNNEL":
-			if len(parts) < 3 {
-				log.Printf("ERROR: [Relay] Invalid CREATE_TUNNEL command for Host ID '%s': %s", s.currentRelayHostID, response)
-				continue
-			}
-			if s.currentRelayHostID == "" {
-				log.Printf("ERROR: [Relay] Received CREATE_TUNNEL before host ID was registered: %s. Ignoring.", response)
-				continue
-			}
-			relayDynamicPortStr := parts[1]
-			sessionToken := parts[2]
-			log.Printf("INFO: [Relay] Received CREATE_TUNNEL for Host ID '%s', session token %s, relay dynamic port %s", s.currentRelayHostID, sessionToken, relayDynamicPortStr)
+				relayHostIP, _, err := net.SplitHostPort(relayCtrlAddrFull)
+				if err != nil {
+					log.Printf("ERROR: [Relay] Could not parse host IP from relayCtrlAddrFull '%s': %v. Cannot create tunnel.", relayCtrlAddrFull, err)
+					continue
+				}
+				relayDataAddrForHost := net.JoinHostPort(relayHostIP, relayDynamicPortStr)
+				log.Printf("INFO: [Relay] Host '%s' will connect to relay data endpoint: %s for session %s", s.currentRelayHostID, relayDataAddrForHost, sessionToken)
 
-			relayHostIP, _, err := net.SplitHostPort(relayCtrlAddrFull)
-			if err != nil {
-				log.Printf("ERROR: [Relay] Could not parse host IP from relayCtrlAddrFull '%s': %v. Cannot create tunnel.", relayCtrlAddrFull, err)
-				continue
+				if relayStatusLabel != nil {
+					relayStatusLabel.SetText(fmt.Sprintf("Relay: Client connecting (ID: %s, Session: %s)...", s.currentRelayHostID, sessionToken[:6]))
+					relayStatusLabel.Refresh()
+				}
+				go s.handleHostSideTunnel(localGrpcSvcAddr, relayDataAddrForHost, sessionToken, s.currentRelayHostID)
+			default:
+				log.Printf("WARN: [Relay] Unknown command from relay server for Host ID '%s': %s", s.currentRelayHostID, response)
 			}
-			relayDataAddrForHost := net.JoinHostPort(relayHostIP, relayDynamicPortStr)
-			log.Printf("INFO: [Relay] Host '%s' will connect to relay data endpoint: %s for session %s", s.currentRelayHostID, relayDataAddrForHost, sessionToken)
-
-			if relayStatusLabel != nil {
-				relayStatusLabel.SetText(fmt.Sprintf("Relay: Client connecting (ID: %s, Session: %s)...", s.currentRelayHostID, sessionToken[:6]))
-				relayStatusLabel.Refresh()
-			}
-			go s.handleHostSideTunnel(localGrpcSvcAddr, relayDataAddrForHost, sessionToken, s.currentRelayHostID)
-		default:
-			log.Printf("WARN: [Relay] Unknown command from relay server for Host ID '%s': %s", s.currentRelayHostID, response)
 		}
+	EndReadLoop:
+		log.Printf("INFO: [Relay] Control connection read loop ended for Host ID '%s'. Will attempt to re-establish.", s.currentRelayHostID)
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -478,7 +576,7 @@ func (s *server) handleHostSideTunnel(localGrpcServiceAddr, relayDataAddrForHost
 	}
 }
 
-func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
+func loadTLSCredentialsFromEmbed(relaxedAuthEnabled bool) (credentials.TransportCredentials, error) {
 	serverCert, err := tls.X509KeyPair(serverCertEmbed, serverKeyEmbed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server key pair from embedded data: %w", err)
@@ -489,11 +587,20 @@ func loadTLSCredentialsFromEmbed() (credentials.TransportCredentials, error) {
 	}
 	config := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    clientCertPool,
 		MinVersion:   tls.VersionTLS12,
 		ServerName:   "localhost",
 	}
+
+	if relaxedAuthEnabled {
+		config.ClientAuth = tls.VerifyClientCertIfGiven
+		config.ClientCAs = clientCertPool
+		log.Println("INFO: [TLS] Server configured with ClientAuth=tls.VerifyClientCertIfGiven (Relaxed Auth Mode)")
+	} else {
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+		config.ClientCAs = clientCertPool
+		log.Println("INFO: [TLS] Server configured with ClientAuth=tls.RequireAndVerifyClientCert (Strict Auth Mode)")
+	}
+
 	return credentials.NewTLS(config), nil
 }
 

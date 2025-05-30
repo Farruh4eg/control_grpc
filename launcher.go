@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"log"
 	"net"
@@ -18,7 +17,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	"golang.org/x/crypto/bcrypt" // Import bcrypt
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -30,8 +29,6 @@ const (
 	bcryptCost              = 12
 )
 
-// getExecutablePath determines the full path to an application executable
-// located in the same directory as the launcher.
 func getExecutablePath(appName string) (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -52,7 +49,7 @@ func main() {
 	mainWindow.SetFixedSize(true)
 
 	relayServerEntry := widget.NewEntry()
-	relayServerEntry.SetPlaceHolder("Relay Server IP:Port (e.g., 193.23.218.76:34000)")
+	relayServerEntry.SetPlaceHolder("Relay Server IP:Port (e.g., " + defaultRelayControlAddr + ")")
 	relayServerEntry.SetText(defaultRelayControlAddr)
 
 	hostButton := widget.NewButton("Become a Host (Direct & Relay)", func() {
@@ -61,24 +58,28 @@ func main() {
 		passwordEntryWidget := widget.NewPasswordEntry()
 		passwordEntryWidget.SetPlaceHolder("Leave empty for no password")
 
+		serverRelaxedAuthCheck := widget.NewCheck("Enable Relaxed Local Authentication (for server)", nil)
+		serverRelaxedAuthCheck.SetChecked(false) // Default to false
+
 		formItems := []*widget.FormItem{
 			{Text: "Session Password", Widget: passwordEntryWidget, HintText: "Enter a password for this session."},
+			{Text: "Advanced", Widget: serverRelaxedAuthCheck, HintText: "Allows clients on local network to connect more easily if they skip server certificate validation."},
 		}
 
-		passwordDialog := dialog.NewForm("Set Session Password", "Set", "Cancel", formItems, func(ok bool) {
+		passwordDialog := dialog.NewForm("Set Host Options", "Set", "Cancel", formItems, func(ok bool) {
 			if !ok {
-				log.Println("INFO: Host cancelled password input.")
+				log.Println("INFO: Host cancelled options input.")
 				return
 			}
 
 			plainPassword := passwordEntryWidget.Text
 			hashedPassword := ""
+			enableServerRelaxedAuth := serverRelaxedAuthCheck.Checked
 
 			if plainPassword == "" {
 				log.Println("INFO: Host chose not to set a password.")
 			} else {
 				log.Println("INFO: Host set a password. Hashing it...")
-				// Hash the password
 				hashBytes, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcryptCost)
 				if err != nil {
 					log.Printf("ERROR: Failed to hash password: %v", err)
@@ -88,9 +89,10 @@ func main() {
 				hashedPassword = string(hashBytes)
 				log.Println("INFO: Password hashed successfully.")
 			}
-			launchServerProcess(mainWindow, fyneApp, relayServerEntry.Text, hashedPassword)
+			log.Printf("INFO: Server will launch with Relaxed Local Auth: %t", enableServerRelaxedAuth)
+			launchServerProcess(mainWindow, fyneApp, relayServerEntry.Text, hashedPassword, enableServerRelaxedAuth)
 		}, mainWindow)
-
+		passwordDialog.Resize(fyne.NewSize(950, 300))
 		passwordDialog.Show()
 	})
 
@@ -109,13 +111,13 @@ func main() {
 		hostButton,
 		connectButton,
 	))
-	mainWindow.Resize(fyne.NewSize(550, 280))
+	mainWindow.Resize(fyne.NewSize(750, 430))
+	mainWindow.SetFixedSize(false)
 	mainWindow.CenterOnScreen()
 	mainWindow.ShowAndRun()
 }
 
-// launchServerProcess now receives hashedPassword (which could be empty)
-func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, hashedPassword string) {
+func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, hashedPassword string, enableRelaxedAuth bool) {
 	serverPath, err := getExecutablePath(serverAppName)
 	if err != nil {
 		log.Printf("ERROR: Could not determine path for server: %v", err)
@@ -131,8 +133,12 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 	if hashedPassword != "" {
 		args = append(args, "-sessionPassword="+hashedPassword)
 	}
+	if enableRelaxedAuth {
+		args = append(args, "-localRelaxedAuth=true")
+	}
 
 	cmd := exec.Command(serverPath, args...)
+	log.Printf("INFO: Launching server with args: %v", args)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -153,12 +159,12 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 		dialog.ShowError(fmt.Errorf("Failed to launch server: %v", err), parentWindow)
 		return
 	}
-	log.Printf("INFO: Server '%s' launched (PID: %d). Relay: %s. Password protection: %t. Waiting for Host ID...",
-		serverPath, cmd.Process.Pid, currentRelayAddr, hashedPassword != "")
+	log.Printf("INFO: Server '%s' launched (PID: %d). Relay: %s. Password protection: %t. Relaxed Auth: %t. Waiting for Host ID...",
+		serverPath, cmd.Process.Pid, currentRelayAddr, hashedPassword != "", enableRelaxedAuth)
 
 	initialDialog := dialog.NewInformation("Host Mode",
-		fmt.Sprintf("Server '%s' launched.\nRelay: %s\nPassword Protected: %t\nWaiting for Host ID...",
-			serverAppName, currentRelayAddr, hashedPassword != ""), parentWindow)
+		fmt.Sprintf("Server '%s' launched.\nRelay: %s\nPassword Protected: %t\nRelaxed Local Auth: %t\nWaiting for Host ID...",
+			serverAppName, currentRelayAddr, hashedPassword != "", enableRelaxedAuth), parentWindow)
 	initialDialog.Show()
 
 	go func() {
@@ -178,10 +184,13 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 				idLabel := widget.NewLabel(fmt.Sprintf("Your Host ID: %s", hostID))
 				idLabel.Wrapping = fyne.TextWrapWord
 				passwordMsg := "Not password protected."
-				if hashedPassword != "" { // Check if a hash was passed, indicating password was set
+				if hashedPassword != "" {
 					passwordMsg = "Session is password protected."
 				}
 				passwordLabel := widget.NewLabel(passwordMsg)
+				relaxedAuthMsg := fmt.Sprintf("Relaxed Local Auth: %t", enableRelaxedAuth)
+				relaxedAuthLabel := widget.NewLabel(relaxedAuthMsg)
+
 				copyButton := widget.NewButton("Copy ID", func() {
 					parentWindow.Clipboard().SetContent(hostID)
 					dialog.ShowInformation("Copied", "Host ID copied to clipboard!", parentWindow)
@@ -190,8 +199,10 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 					widget.NewLabel("Server is running and registered."),
 					idLabel,
 					passwordLabel,
+					relaxedAuthLabel,
 					copyButton,
 				)
+				content.Resize(fyne.NewSize(600, 600))
 				dialog.ShowCustom("Host Ready", "Close", content, parentWindow)
 				return
 			}
@@ -218,20 +229,25 @@ func launchServerProcess(parentWindow fyne.Window, fyneApp fyne.App, relayAddr, 
 	}()
 }
 
-func launchClientApplication(clientPath, targetAddress string, isRelayConn bool, sessionToken string, parentWindow fyne.Window) {
+func launchClientApplication(clientPath, targetAddress string, isRelayConn bool, sessionToken string, allowLocalInsecure bool, parentWindow fyne.Window) {
 	connectionType := "direct"
 	if isRelayConn {
 		connectionType = "relay"
 	}
-	log.Printf("INFO: Attempting to launch client for %s (via %s connection)", targetAddress, connectionType)
+	log.Printf("INFO: Attempting to launch client for %s (via %s connection). AllowLocalInsecure: %t", targetAddress, connectionType, allowLocalInsecure)
 
 	args := []string{fmt.Sprintf("-address=%s", targetAddress)}
 	if isRelayConn {
 		args = append(args, "-connectionType=relay")
 		args = append(args, fmt.Sprintf("-sessionToken=%s", sessionToken))
 	}
+	if allowLocalInsecure {
+		args = append(args, "-allowLocalInsecure=true")
+	}
 
 	cmd := exec.Command(clientPath, args...)
+	log.Printf("INFO: Launching client with args: %v", args)
+
 	clientStdout, _ := cmd.StdoutPipe()
 	clientStderr, _ := cmd.StderrPipe()
 
@@ -256,8 +272,8 @@ func launchClientApplication(clientPath, targetAddress string, isRelayConn bool,
 		}
 	}()
 
-	successMsg := fmt.Sprintf("Client '%s' launched (PID: %d) targeting %s (via %s).",
-		filepath.Base(clientPath), cmd.Process.Pid, targetAddress, connectionType)
+	successMsg := fmt.Sprintf("Client '%s' launched (PID: %d) targeting %s (via %s).\nAllowLocalInsecure: %t",
+		filepath.Base(clientPath), cmd.Process.Pid, targetAddress, connectionType, allowLocalInsecure)
 	log.Printf("INFO: %s", successMsg)
 	dialog.ShowInformation("Client Mode", successMsg, parentWindow)
 
@@ -267,8 +283,6 @@ func launchClientApplication(clientPath, targetAddress string, isRelayConn bool,
 	}()
 }
 
-// connectViaRelay sends the PLAIN TEXT password entered by the connecting client.
-// The host will compare this against its stored HASH.
 func connectViaRelay(targetHostID, plainTextPassword, relayControlAddr string) (connected bool, relayDataAddrForClient string, sessionToken string, err error) {
 	log.Printf("INFO: [Relay] Attempting to connect to HostID '%s' via relay server %s (password provided for verification: %t)",
 		targetHostID, relayControlAddr, plainTextPassword != "")
@@ -339,11 +353,15 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 	hostIDEntry.SetPlaceHolder("Host's IP:PORT (direct) or HostID (relay)")
 
 	passwordEntryWidget := widget.NewPasswordEntry()
-	passwordEntryWidget.SetPlaceHolder("Password (if host requires it)")
+	passwordEntryWidget.SetPlaceHolder("Password (if host requires it for relay)")
+
+	clientAllowInsecureCheck := widget.NewCheck("Allow Insecure Local Connection (client-side)", nil)
+	clientAllowInsecureCheck.SetChecked(false)
 
 	formItems := []*widget.FormItem{
 		{Text: "Target Address/HostID", Widget: hostIDEntry},
 		{Text: "Password (for Relay)", Widget: passwordEntryWidget},
+		{Text: "Advanced (Direct Only)", Widget: clientAllowInsecureCheck},
 	}
 
 	form := &widget.Form{
@@ -351,6 +369,8 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 		OnSubmit: func() {
 			userInput := hostIDEntry.Text
 			plainTextPasswordAttempt := passwordEntryWidget.Text
+			enableClientAllowInsecure := clientAllowInsecureCheck.Checked
+
 			if userInput == "" {
 				dialog.ShowInformation("Input Required", "Please enter the target address or HostID.", inputWindow)
 				return
@@ -365,45 +385,32 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 			}
 
 			isPotentiallyDirect := strings.Contains(userInput, ":") && !strings.ContainsAny(userInput, " \t\n")
-			var directErr error
+			var directErr error = fmt.Errorf("not attempted or not applicable")
 
 			if isPotentiallyDirect {
-				log.Printf("INFO: Attempting direct connection to %s ...", userInput)
-				ctxDirect, cancelDirect := context.WithTimeout(context.Background(), directConnectionTimeout)
-				defer cancelDirect()
-				var d net.Dialer
-				connDirect, errDial := d.DialContext(ctxDirect, "tcp", userInput)
-				directErr = errDial
-				if errDial == nil {
-					connDirect.Close()
-					log.Printf("INFO: Direct TCP connection to %s successful.", userInput)
-					launchClientApplication(clientPath, userInput, false, "", parentWindow)
-					return
-				}
-				if ctxDirect.Err() == context.DeadlineExceeded {
-					log.Printf("WARN: Direct connection to %s timed out.", userInput)
-					directErr = fmt.Errorf("direct connection timed out")
-				} else {
-					log.Printf("WARN: Direct connection to %s failed: %v", userInput, errDial)
-				}
+				log.Printf("INFO: Attempting direct connection to %s (AllowInsecure: %t)...", userInput, enableClientAllowInsecure)
+
+				launchClientApplication(clientPath, userInput, false, "", enableClientAllowInsecure, parentWindow)
+				return
 			} else {
 				log.Printf("INFO: Input '%s' does not look like IP:PORT, proceeding to relay.", userInput)
-				directErr = fmt.Errorf("input not IP:Port format")
+				directErr = fmt.Errorf("input not in IP:Port format, attempting relay")
 			}
 
 			targetHostID := userInput
-			log.Printf("INFO: Direct connection failed/skipped. Attempting relay for HostID '%s' using relay %s...", targetHostID, relayServerControlAddr)
+			log.Printf("INFO: Attempting relay for HostID '%s' using relay %s...", targetHostID, relayServerControlAddr)
 
 			relayConnected, relayedAddressForClient, sessionToken, errRelay := connectViaRelay(targetHostID, plainTextPasswordAttempt, relayServerControlAddr)
 
 			if relayConnected {
 				log.Printf("INFO: Connection via relay for HostID '%s' successful. Client to connect to %s.", targetHostID, relayedAddressForClient)
-				launchClientApplication(clientPath, relayedAddressForClient, true, sessionToken, parentWindow)
+
+				launchClientApplication(clientPath, relayedAddressForClient, true, sessionToken, enableClientAllowInsecure, parentWindow)
 				return
 			}
 
 			log.Printf("WARN: Relay connection attempt for HostID '%s' failed: %v", targetHostID, errRelay)
-			finalErrMsg := fmt.Sprintf("Failed to connect to target '%s'.\n\nDirect attempt: %v.\nRelay attempt: %v.",
+			finalErrMsg := fmt.Sprintf("Failed to connect to target '%s'.\n\nDirect connection note: %v.\nRelay connection attempt: %v.",
 				userInput, directErr, errRelay)
 			dialog.ShowError(fmt.Errorf(finalErrMsg), parentWindow)
 		},
@@ -412,7 +419,7 @@ func promptForAddressAndPasswordAndConnect(parentWindow fyne.Window, a fyne.App,
 		},
 	}
 	inputWindow.SetContent(form)
-	inputWindow.Resize(fyne.NewSize(400, 180))
+	inputWindow.Resize(fyne.NewSize(950, 320))
 	inputWindow.CenterOnScreen()
 	inputWindow.Show()
 }

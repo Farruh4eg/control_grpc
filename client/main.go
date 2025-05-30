@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	pb "control_grpc/gen/proto"
@@ -57,9 +60,10 @@ var (
 	terminalScroll        *container.Scroll
 	terminalMutex         sync.Mutex
 
-	serverAddrActual *string
-	connectionType   *string
-	sessionToken     *string
+	serverAddrActual      *string
+	connectionType        *string
+	sessionToken          *string
+	allowLocalInsecureOpt *bool
 )
 
 func customRelayDialer(ctx context.Context, targetRelayDataAddr string) (net.Conn, error) {
@@ -111,11 +115,13 @@ func main() {
 	serverAddrActual = clientFlags.String("address", "localhost:32212", "The server address (direct) or relay data address (relay)")
 	connectionType = clientFlags.String("connectionType", "direct", "Connection type: 'direct' or 'relay'")
 	sessionToken = clientFlags.String("sessionToken", "", "Session token for relay connection")
+	allowLocalInsecureOpt = clientFlags.Bool("allowLocalInsecure", false, "Allow insecure TLS for local IP addresses (dev only)")
 
 	err := clientFlags.Parse(os.Args[1:])
 	if err != nil {
 		log.Fatalf("FATAL: Error parsing flags: %v", err)
 	}
+	allowLocalInsecure := *allowLocalInsecureOpt // Dereference once after parsing
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -128,40 +134,131 @@ func main() {
 	imageCanvas.SetMinSize(normalSize)
 	imageCanvas.FillMode = canvas.ImageFillStretch
 
-	tlsCreds, err := loadTLSCredentialsFromEmbed(*serverAddrActual)
-	if err != nil {
-		log.Fatalf("FATAL: Cannot load TLS credentials: %v", err)
-	}
+	var conn *grpc.ClientConn
+	var dialErr error
 
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(tlsCreds),
-	}
+	log.Printf("INFO: Client attempting to connect. Type: '%s', Address: '%s', AllowLocalInsecure: %t", *connectionType, *serverAddrActual, allowLocalInsecure)
 
-	log.Printf("INFO: Client attempting to connect. Type: '%s', Address: '%s'", *connectionType, *serverAddrActual)
+	if *connectionType == "direct" {
+		// Initial attempt with standard TLS
+		log.Println("INFO: Attempting secure direct connection...")
+		log.Println("INFO: Attempting secure direct connection (with blocking dial)...")
+		tlsCreds, err := loadTLSCredentialsFromEmbed(*serverAddrActual, false)
+		if err != nil {
+			log.Fatalf("FATAL: Cannot load initial TLS credentials: %v", err)
+		}
+		opts := []grpc.DialOption{
+			grpc.WithTransportCredentials(tlsCreds),
+			grpc.WithBlock(),
+		}
+		dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, dialErr = grpc.DialContext(dialCtx, *serverAddrActual, opts...)
+		dialCancel()
 
-	if *connectionType == "relay" {
+		if dialErr != nil {
+			log.Printf("WARN: Initial secure connection attempt to %s failed: %v", *serverAddrActual, dialErr)
+
+			ipRegex := regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[a-fA-F0-9:]+\])(:\d+)?$`)
+			localhostRegex := regexp.MustCompile(`^(?i)(localhost|127\.0\.0\.1|::1)(:\d+)?$`)
+			isPotentiallyLocal := ipRegex.MatchString(*serverAddrActual) || localhostRegex.MatchString(*serverAddrActual)
+
+			isTLSHandshakeOrConnectivityError := false
+			if s, ok := status.FromError(dialErr); ok {
+				switch s.Code() {
+				case codes.Unavailable, codes.DeadlineExceeded:
+					isTLSHandshakeOrConnectivityError = true
+					log.Printf("DEBUG: gRPC status error indicative of TLS/connectivity issue: %s", s.Code())
+				}
+			}
+			if !isTLSHandshakeOrConnectivityError {
+				var x509UnknownAuthErr x509.UnknownAuthorityError
+				var x509CertInvalidErr x509.CertificateInvalidError
+				var netOpErr *net.OpError
+
+				if errors.As(dialErr, &x509UnknownAuthErr) || errors.As(dialErr, &x509CertInvalidErr) || errors.Is(dialErr, credentials.ErrConnDispatched) || errors.As(dialErr, &netOpErr) {
+					isTLSHandshakeOrConnectivityError = true
+					log.Printf("DEBUG: Underlying error indicative of TLS/connectivity issue: %T, %v", dialErr, dialErr)
+				}
+			}
+			if !isTLSHandshakeOrConnectivityError && errors.Is(dialErr, context.DeadlineExceeded) {
+				isTLSHandshakeOrConnectivityError = true
+				log.Printf("DEBUG: Dial error is context.DeadlineExceeded, considering it a connectivity issue for retry.")
+			}
+
+			if allowLocalInsecure && isPotentiallyLocal && isTLSHandshakeOrConnectivityError {
+				log.Printf("INFO: Conditions met for insecure retry to %s (local-like address, error: %v, flag enabled).", *serverAddrActual, dialErr)
+				log.Printf("WARN: Retrying connection to %s with InsecureSkipVerify enabled.", *serverAddrActual)
+
+				tlsCredsRetry, errRetry := loadTLSCredentialsFromEmbed(*serverAddrActual, true) // isRetryInsecure = true
+				if errRetry != nil {
+					log.Fatalf("FATAL: Cannot load TLS credentials for insecure retry: %v", errRetry)
+				}
+
+				var retryOpts []grpc.DialOption
+				if tlsCredsRetry == nil {
+					log.Println("ERROR: loadTLSCredentialsFromEmbed returned nil for retry credentials. Attempting with fully insecure.")
+					retryOpts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock()}
+				} else {
+					retryOpts = []grpc.DialOption{grpc.WithTransportCredentials(tlsCredsRetry), grpc.WithBlock()}
+				}
+
+				dialCtxRetry, dialCancelRetry := context.WithTimeout(context.Background(), 15*time.Second)
+				conn, dialErr = grpc.DialContext(dialCtxRetry, *serverAddrActual, retryOpts...)
+				dialCancelRetry()
+
+				if dialErr != nil {
+					log.Printf("ERROR: Insecure retry connection attempt to %s also failed: %v", *serverAddrActual, dialErr)
+				} else {
+					log.Printf("INFO: Insecure retry connection to %s succeeded.", *serverAddrActual)
+				}
+			} else {
+				log.Printf("INFO: Conditions for insecure retry not met (allowLocalInsecure: %t, isPotentiallyLocal: %t, isTLSHandshakeOrConnectivityError: %t). Original error: %v",
+					allowLocalInsecure, isPotentiallyLocal, isTLSHandshakeOrConnectivityError, dialErr)
+			}
+		}
+	} else if *connectionType == "relay" {
 		if *sessionToken == "" {
 			log.Fatalf("FATAL: Relay connection type specified but no session token provided.")
 		}
 		log.Printf("INFO: Using custom dialer for relay connection to %s with session token %s", *serverAddrActual, *sessionToken)
-		opts = append(opts, grpc.WithContextDialer(customRelayDialer))
+		tlsCreds, err := loadTLSCredentialsFromEmbed(*serverAddrActual, false)
+		if err != nil {
+			log.Fatalf("FATAL: Cannot load TLS credentials for relay: %v", err)
+		}
+		opts := []grpc.DialOption{
+			grpc.WithTransportCredentials(tlsCreds),
+			grpc.WithContextDialer(customRelayDialer),
+		}
+		dialCtx, dialCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		conn, dialErr = grpc.DialContext(dialCtx, *serverAddrActual, opts...)
+		dialCancel()
+	} else {
+		dialErr = fmt.Errorf("unknown connection type: '%s'", *connectionType)
 	}
 
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer dialCancel()
-
-	conn, err := grpc.DialContext(dialCtx, *serverAddrActual, opts...)
-	if err != nil {
-		log.Printf("ERROR: Could not connect to %s: %v", *serverAddrActual, err)
-		if currentFyneApp.Driver() != nil && mainAppWindow != nil {
-			go func() {
-				time.Sleep(100 * time.Millisecond)
-				dialog.ShowError(fmt.Errorf("Could not connect to server: %v", err), mainAppWindow)
-			}()
-			time.Sleep(2 * time.Second)
+	if dialErr != nil {
+		log.Printf("ERROR: Final connection attempt failed for '%s' (type: %s): %v", *serverAddrActual, *connectionType, dialErr)
+		if currentFyneApp.Driver() != nil {
+			var parentWindow fyne.Window = mainAppWindow
+			if mainAppWindow == nil || mainAppWindow.Canvas() == nil {
+				allWindows := currentFyneApp.Driver().AllWindows()
+				if len(allWindows) > 0 {
+					parentWindow = allWindows[0]
+				} else {
+					parentWindow = nil
+				}
+			}
+			if parentWindow != nil {
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					dialog.ShowError(fmt.Errorf("Could not connect to server '%s': %v. Check logs.", *serverAddrActual, dialErr), parentWindow)
+				}()
+				time.Sleep(2 * time.Second)
+			}
 		}
 		os.Exit(1)
 	}
+
 	defer conn.Close()
 	log.Printf("INFO: Successfully connected to server/relay at %s", *serverAddrActual)
 
@@ -314,33 +411,39 @@ func main() {
 	log.Println("Client shutdown complete.")
 }
 
-func loadTLSCredentialsFromEmbed(serverAddrString string) (credentials.TransportCredentials, error) {
+func loadTLSCredentialsFromEmbed(serverAddrString string, isRetryInsecure bool) (credentials.TransportCredentials, error) {
 	clientCert, err := tls.X509KeyPair(clientCertEmbed, clientKeyEmbed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load client key pair from embedded data: %w", err)
 	}
 	serverCertPool := x509.NewCertPool()
 	if !serverCertPool.AppendCertsFromPEM(serverCACertEmbed) {
-		return nil, fmt.Errorf("failed to append server CA cert to pool: %w", err)
+		return nil, fmt.Errorf("failed to append server CA cert to pool from embedded data: %w", err)
 	}
+
 	var tlsServerName string
-	if connectionType != nil && *connectionType == "relay" {
-		log.Printf("WARN: [TLS] In relay mode, ServerName for TLS is critical. Using 'localhost' as a placeholder for relay connections.")
-		tlsServerName = "localhost"
+	host, _, err := net.SplitHostPort(serverAddrString)
+	if err != nil {
+		log.Printf("WARN: [TLS] Could not parse host:port from server address '%s': %v. Using '%s' as ServerName.", serverAddrString, err, serverAddrString)
+		tlsServerName = serverAddrString
 	} else {
-		host, _, err := net.SplitHostPort(serverAddrString)
-		if err != nil {
-			log.Printf("WARN: [TLS] Could not parse host from server address '%s': %v. Defaulting ServerName to '%s'.", serverAddrString, err, serverAddrString)
-			tlsServerName = serverAddrString
-		} else {
-			tlsServerName = host
-		}
+		tlsServerName = host
 	}
-	log.Printf("INFO: [TLS] Using ServerName: '%s' for TLS configuration.", tlsServerName)
+
+	log.Printf("INFO: [TLS] Using ServerName: '%s' for TLS configuration. Target address: '%s'", tlsServerName, serverAddrString)
+
 	config := &tls.Config{
-		Certificates: []tls.Certificate{clientCert}, RootCAs: serverCertPool,
-		MinVersion: tls.VersionTLS12, ServerName: tlsServerName,
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      serverCertPool,
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   tlsServerName,
 	}
+
+	if allowLocalInsecureOpt != nil && *allowLocalInsecureOpt && isRetryInsecure {
+		log.Printf("WARN: [TLS] Setting InsecureSkipVerify = true for ServerName '%s' (target: %s) due to -allowLocalInsecure flag and retry attempt.", tlsServerName, serverAddrString)
+		config.InsecureSkipVerify = true
+	}
+
 	return credentials.NewTLS(config), nil
 }
 
